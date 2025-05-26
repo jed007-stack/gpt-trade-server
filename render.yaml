@@ -7,4 +7,4 @@ services:
     startCommand: uvicorn main:app --host 0.0.0.0 --port 8000
     envVars:
       - key: OPENAI_API_KEY
-        value: sk-xxxxxxx-your-key-here
+        value: ""
