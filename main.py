@@ -5,7 +5,7 @@ import openai
 import os
 import logging
 
-# Set your OpenAI API key from environment
+# Set OpenAI API key from environment variable
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
 app = FastAPI()
@@ -31,7 +31,7 @@ class TradeData(BaseModel):
     live_candle2: Candle
 
 class TradeWrapper(BaseModel):
-    data: TradeData  # ✅ Accepts {"data": { ... }}
+    data: TradeData
 
 # ======= Endpoint =======
 @app.post("/gpt/manage")
@@ -61,19 +61,23 @@ Respond strictly with one of:
 """
 
     try:
-        response = openai.ChatCompletion.create(
+        client = openai.OpenAI()  # ✅ New client interface (openai>=1.0.0)
+
+        chat_response = client.chat.completions.create(
             model="gpt-4",
             messages=[
-                { "role": "system", "content": "You are a disciplined trade manager focused on risk and edge." },
-                { "role": "user", "content": prompt }
+                {"role": "system", "content": "You are a disciplined trade manager focused on risk and edge."},
+                {"role": "user", "content": prompt}
             ],
             max_tokens=100,
             temperature=0.3
         )
-        text = response['choices'][0]['message']['content']
+
+        text = chat_response.choices[0].message.content
         logging.info(f"🎯 GPT Response: {text}")
-        return eval(text) if text.startswith("{") else { "action": "hold" }
+
+        return eval(text) if text.startswith("{") else {"action": "hold"}
 
     except Exception as e:
         logging.error(f"❌ GPT error: {str(e)}")
-        return { "action": "hold", "error": str(e) }
+        return {"action": "hold", "error": str(e)}
