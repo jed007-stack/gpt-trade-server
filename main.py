@@ -1,13 +1,12 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
 from typing import List
+import openai
 import os
 import logging
-import openai
-from openai import OpenAI
 
 # Set OpenAI API key from environment
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+openai.api_key = os.getenv("OPENAI_API_KEY")
 
 app = FastAPI()
 logging.basicConfig(level=logging.INFO)
@@ -39,9 +38,14 @@ class TradeWrapper(BaseModel):
 async def gpt_manager(wrapper: TradeWrapper):
     trade = wrapper.data
 
-    logging.info(f"✅ Received: {trade.symbol} {trade.direction} from {trade.open_price} -> {trade.current_price}")
-    logging.info(f"🕯️ Candles1: {len(trade.candles1)} | Candles2: {len(trade.candles2)}")
+    # Calculate simple unrealized PnL and ATR(1)
+    pnl = trade.current_price - trade.open_price if trade.direction == "buy" else trade.open_price - trade.current_price
+    atr = abs(trade.candles1[-1].high - trade.candles1[-1].low)
 
+    logging.info(f"✅ Received: {trade.symbol} {trade.direction} from {trade.open_price} -> {trade.current_price}")
+    logging.info(f"🕯️ Candles1: {len(trade.candles1)} | Candles2: {len(trade.candles2)} | PnL: {pnl:.2f} | ATR: {atr:.2f}")
+
+    # === GPT Prompt ===
     prompt = f"""
 You are a professional forex position manager.
 
@@ -52,6 +56,8 @@ Timeframe: {trade.timeframe}
 Direction: {trade.direction}
 Open Price: {trade.open_price}
 Current Price: {trade.current_price}
+Unrealized PnL: {pnl:.2f}
+Approx ATR: {atr:.2f}
 Candle Count 1: {len(trade.candles1)}
 Candle Count 2: {len(trade.candles2)}
 
@@ -62,8 +68,11 @@ Respond strictly with one of:
 """
 
     try:
-        response = client.chat.completions.create(
-            model="gpt-3.5-turbo",  # ✅ using GPT-3.5
+        # Use legacy or v1 OpenAI client
+        client = openai.OpenAI() if hasattr(openai, "OpenAI") else openai
+
+        response = client.ChatCompletion.create(
+            model="gpt-4",
             messages=[
                 { "role": "system", "content": "You are a disciplined trade manager focused on risk and edge." },
                 { "role": "user", "content": prompt }
@@ -71,8 +80,10 @@ Respond strictly with one of:
             max_tokens=100,
             temperature=0.3
         )
+
         text = response.choices[0].message.content.strip()
         logging.info(f"🎯 GPT Response: {text}")
+
         return eval(text) if text.startswith("{") else { "action": "hold" }
 
     except Exception as e:
