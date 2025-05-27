@@ -4,10 +4,9 @@ from typing import List
 import os
 import logging
 import openai
-
-# ✅ NEW OpenAI Client syntax for v1+
 from openai import OpenAI
 
+# Set OpenAI API key from environment
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 app = FastAPI()
@@ -64,7 +63,7 @@ Respond strictly with one of:
 
     try:
         response = client.chat.completions.create(
-            model="gpt-4",
+            model="gpt-3.5-turbo",  # ✅ using GPT-3.5
             messages=[
                 { "role": "system", "content": "You are a disciplined trade manager focused on risk and edge." },
                 { "role": "user", "content": prompt }
