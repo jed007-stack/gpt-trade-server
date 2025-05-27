@@ -1,12 +1,14 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
 from typing import List
-import openai
 import os
 import logging
+import openai
 
-# Set OpenAI API key from environment variable
-openai.api_key = os.getenv("OPENAI_API_KEY")
+# ✅ NEW OpenAI Client syntax for v1+
+from openai import OpenAI
+
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 app = FastAPI()
 logging.basicConfig(level=logging.INFO)
@@ -61,8 +63,6 @@ Respond strictly with one of:
 """
 
     try:
-        client = openai.OpenAI()  # ✅ NEW client creation in v1.x
-
         response = client.chat.completions.create(
             model="gpt-4",
             messages=[
@@ -72,10 +72,8 @@ Respond strictly with one of:
             max_tokens=100,
             temperature=0.3
         )
-
         text = response.choices[0].message.content.strip()
         logging.info(f"🎯 GPT Response: {text}")
-
         return eval(text) if text.startswith("{") else { "action": "hold" }
 
     except Exception as e:
