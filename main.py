@@ -1,16 +1,17 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from pydantic import BaseModel
 from typing import List
 import openai
 import os
 import logging
 
+# Set your OpenAI API key from environment
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
 app = FastAPI()
 logging.basicConfig(level=logging.INFO)
 
-# ======= Candle and Trade Models =======
+# ======= Data Models =======
 class Candle(BaseModel):
     open: float
     high: float
@@ -30,13 +31,15 @@ class TradeData(BaseModel):
     live_candle2: Candle
 
 class TradeWrapper(BaseModel):
-    data: TradeData
+    data: TradeData  # ✅ Accepts {"data": { ... }}
 
 # ======= Endpoint =======
 @app.post("/gpt/manage")
 async def gpt_manager(wrapper: TradeWrapper):
     trade = wrapper.data
-    logging.info(f"Received trade: {trade.symbol} {trade.direction} at {trade.open_price} -> {trade.current_price}")
+
+    logging.info(f"✅ Received: {trade.symbol} {trade.direction} from {trade.open_price} -> {trade.current_price}")
+    logging.info(f"🕯️ Candles1: {len(trade.candles1)} | Candles2: {len(trade.candles2)}")
 
     prompt = f"""
 You are a professional forex position manager.
@@ -51,7 +54,7 @@ Current Price: {trade.current_price}
 Candle Count 1: {len(trade.candles1)}
 Candle Count 2: {len(trade.candles2)}
 
-Respond with one of:
+Respond strictly with one of:
 {{ "action": "hold" }}
 {{ "action": "close" }}
 {{ "action": "trail_sl", "new_sl": 2350.0 }}
@@ -68,8 +71,9 @@ Respond with one of:
             temperature=0.3
         )
         text = response['choices'][0]['message']['content']
+        logging.info(f"🎯 GPT Response: {text}")
         return eval(text) if text.startswith("{") else { "action": "hold" }
 
     except Exception as e:
-        logging.error(f"GPT error: {str(e)}")
+        logging.error(f"❌ GPT error: {str(e)}")
         return { "action": "hold", "error": str(e) }
