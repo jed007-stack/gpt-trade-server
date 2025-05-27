@@ -1,12 +1,12 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
-from typing import List, Optional, Dict
+from typing import List, Optional
 from fastapi.responses import JSONResponse
 import openai
 import os
 import logging
 
-# Load OpenAI key
+# === Setup ===
 openai.api_key = os.getenv("OPENAI_API_KEY")
 app = FastAPI()
 logging.basicConfig(level=logging.INFO)
@@ -48,6 +48,7 @@ class TradeData(BaseModel):
     direction: str
     open_price: float
     current_price: float
+    news_override: Optional[bool] = False
     indicators: Indicators
     position: Optional[Position]
     account: Optional[Account]
@@ -59,22 +60,23 @@ class TradeData(BaseModel):
 class TradeWrapper(BaseModel):
     data: TradeData
 
-# === GPT Manager Route ===
+# === GPT Manager ===
 @app.post("/gpt/manage")
 async def gpt_manage(wrapper: TradeWrapper):
     trade = wrapper.data
-
-    log_msg = f"✅ {trade.symbol} | Dir: {trade.direction} | Price: {trade.open_price} → {trade.current_price}"
-    logging.info(log_msg)
-
     ind = trade.indicators
     pos = trade.position
     acc = trade.account or Account(balance=10000, equity=10000)
 
-    prompt = f"""
-You are a professional trade manager AI.
+    logging.info(f"✅ {trade.symbol} | Dir: {trade.direction} | {trade.open_price} → {trade.current_price}")
+    logging.info(f"📊 RSI: {ind.rsi}, ADX: {ind.adx}, ATR: {ind.atr}, MACD: {ind.macd.main}/{ind.macd.signal}")
 
-Here is the live trade information:
+    if trade.news_override:
+        logging.warning("🛑 News conflict detected. GPT override active.")
+        return JSONResponse(content={"action": "hold", "reason": "News conflict — override active"})
+
+    prompt = f"""
+You are an expert forex trade manager AI. Make decisions based on price, indicators, and position risk.
 
 Symbol: {trade.symbol}
 Timeframe: {trade.timeframe}
@@ -95,8 +97,9 @@ Floating PnL: {pos.pnl if pos else "n/a"}
 
 --- Account ---
 Balance: {acc.balance}
+Equity: {acc.equity}
 
-Respond with one:
+Respond ONLY with one of the following:
 {{"action": "hold"}}
 {{"action": "close"}}
 {{"action": "trail_sl", "new_sl": 2345.0}}
@@ -104,12 +107,12 @@ Respond with one:
 """
 
     try:
-        client = openai.OpenAI()  # OpenAI v1 client
+        client = openai.OpenAI()
         chat = client.chat.completions.create(
-            model="gpt-3.5-turbo",  # Use "gpt-4" if you upgrade
+            model="gpt-3.5-turbo",
             messages=[
-                { "role": "system", "content": "You are a disciplined, risk-aware trading assistant." },
-                { "role": "user", "content": prompt }
+                {"role": "system", "content": "You are a disciplined, risk-aware trading assistant."},
+                {"role": "user", "content": prompt}
             ],
             max_tokens=100,
             temperature=0.3
@@ -120,8 +123,8 @@ Respond with one:
         if decision.startswith("{"):
             return JSONResponse(content=eval(decision))
         else:
-            return JSONResponse(content={ "action": "hold", "raw": decision })
+            return JSONResponse(content={"action": "hold", "raw": decision})
 
     except Exception as e:
         logging.error(f"❌ GPT Error: {str(e)}")
-        return JSONResponse(content={ "action": "hold", "error": str(e) })
+        return JSONResponse(content={"action": "hold", "error": str(e)})
