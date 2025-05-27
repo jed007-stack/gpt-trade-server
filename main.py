@@ -61,23 +61,23 @@ Respond strictly with one of:
 """
 
     try:
-        client = openai.OpenAI()  # ✅ New client interface (openai>=1.0.0)
+        client = openai.OpenAI()  # ✅ NEW client creation in v1.x
 
-        chat_response = client.chat.completions.create(
+        response = client.chat.completions.create(
             model="gpt-4",
             messages=[
-                {"role": "system", "content": "You are a disciplined trade manager focused on risk and edge."},
-                {"role": "user", "content": prompt}
+                { "role": "system", "content": "You are a disciplined trade manager focused on risk and edge." },
+                { "role": "user", "content": prompt }
             ],
             max_tokens=100,
             temperature=0.3
         )
 
-        text = chat_response.choices[0].message.content
+        text = response.choices[0].message.content.strip()
         logging.info(f"🎯 GPT Response: {text}")
 
-        return eval(text) if text.startswith("{") else {"action": "hold"}
+        return eval(text) if text.startswith("{") else { "action": "hold" }
 
     except Exception as e:
         logging.error(f"❌ GPT error: {str(e)}")
-        return {"action": "hold", "error": str(e)}
+        return { "action": "hold", "error": str(e) }
