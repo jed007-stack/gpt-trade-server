@@ -1,11 +1,22 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from pydantic import BaseModel
+from typing import List
 import openai
 import os
+import logging
 
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
 app = FastAPI()
+logging.basicConfig(level=logging.INFO)
+
+# ======= Data Models =======
+class Candle(BaseModel):
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float
 
 class TradeData(BaseModel):
     symbol: str
@@ -13,30 +24,26 @@ class TradeData(BaseModel):
     direction: str
     open_price: float
     current_price: float
-    atr: float
-    rsi: float
-    bb_width: float
-    volume: float
-    pattern: str
-    htf_trend: str
+    candles1: List[Candle]
+    candles2: List[Candle]
 
+# ======= Endpoint =======
 @app.post("/gpt/manage")
 async def gpt_manager(trade: TradeData):
+    logging.info(f"Received trade: {trade.symbol} {trade.direction} at {trade.open_price} -> {trade.current_price}")
+
     prompt = f"""
 You are a professional forex position manager.
 
-Evaluate this trade:
-- Symbol: {trade.symbol}
-- Timeframe: {trade.timeframe}
-- Direction: {trade.direction}
-- Open Price: {trade.open_price}
-- Current Price: {trade.current_price}
-- ATR: {trade.atr}
-- RSI: {trade.rsi}
-- BB Width: {trade.bb_width}
-- Volume: {trade.volume}
-- Pattern: {trade.pattern}
-- HTF Trend: {trade.htf_trend}
+Evaluate this trade setup:
+
+Symbol: {trade.symbol}
+Timeframe: {trade.timeframe}
+Direction: {trade.direction}
+Open Price: {trade.open_price}
+Current Price: {trade.current_price}
+Candle Count 1: {len(trade.candles1)}
+Candle Count 2: {len(trade.candles2)}
 
 Respond with one of:
 {{ "action": "hold" }}
@@ -48,7 +55,7 @@ Respond with one of:
         response = openai.ChatCompletion.create(
             model="gpt-4",
             messages=[
-                { "role": "system", "content": "You are a strict, professional trade manager focused on reducing drawdown and maximizing edge." },
+                { "role": "system", "content": "You are a disciplined trade manager focused on risk and edge." },
                 { "role": "user", "content": prompt }
             ],
             max_tokens=100,
@@ -58,4 +65,5 @@ Respond with one of:
         return eval(text) if text.startswith("{") else { "action": "hold" }
 
     except Exception as e:
+        logging.error(f"GPT error: {str(e)}")
         return { "action": "hold", "error": str(e) }
