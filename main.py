@@ -1,17 +1,27 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
-from typing import List
+from typing import List, Optional, Dict
+from fastapi.responses import JSONResponse
 import openai
 import os
 import logging
 
-# Set OpenAI API key from environment
+# Load OpenAI key
 openai.api_key = os.getenv("OPENAI_API_KEY")
-
 app = FastAPI()
 logging.basicConfig(level=logging.INFO)
 
-# ======= Data Models =======
+# === Data Models ===
+class MACD(BaseModel):
+    main: float
+    signal: float
+
+class Indicators(BaseModel):
+    rsi: float
+    adx: float
+    atr: float
+    macd: MACD
+
 class Candle(BaseModel):
     open: float
     high: float
@@ -19,12 +29,28 @@ class Candle(BaseModel):
     close: float
     volume: float
 
+class Position(BaseModel):
+    direction: str
+    open_price: float
+    sl: Optional[float]
+    tp: Optional[float]
+    lot: Optional[float]
+    pnl: Optional[float]
+
+class Account(BaseModel):
+    balance: float
+    equity: float
+    margin: Optional[float]
+
 class TradeData(BaseModel):
     symbol: str
     timeframe: str
     direction: str
     open_price: float
     current_price: float
+    indicators: Indicators
+    position: Optional[Position]
+    account: Optional[Account]
     candles1: List[Candle]
     candles2: List[Candle]
     live_candle1: Candle
@@ -33,59 +59,69 @@ class TradeData(BaseModel):
 class TradeWrapper(BaseModel):
     data: TradeData
 
-# ======= Endpoint =======
+# === GPT Manager Route ===
 @app.post("/gpt/manage")
-async def gpt_manager(wrapper: TradeWrapper):
+async def gpt_manage(wrapper: TradeWrapper):
     trade = wrapper.data
 
-    # Calculate simple unrealized PnL and ATR(1)
-    pnl = trade.current_price - trade.open_price if trade.direction == "buy" else trade.open_price - trade.current_price
-    atr = abs(trade.candles1[-1].high - trade.candles1[-1].low)
+    log_msg = f"✅ {trade.symbol} | Dir: {trade.direction} | Price: {trade.open_price} → {trade.current_price}"
+    logging.info(log_msg)
 
-    logging.info(f"✅ Received: {trade.symbol} {trade.direction} from {trade.open_price} -> {trade.current_price}")
-    logging.info(f"🕯️ Candles1: {len(trade.candles1)} | Candles2: {len(trade.candles2)} | PnL: {pnl:.2f} | ATR: {atr:.2f}")
+    ind = trade.indicators
+    pos = trade.position
+    acc = trade.account or Account(balance=10000, equity=10000)
 
-    # === GPT Prompt ===
     prompt = f"""
-You are a professional forex position manager.
+You are a professional trade manager AI.
 
-Evaluate this trade setup:
+Here is the live trade information:
 
 Symbol: {trade.symbol}
 Timeframe: {trade.timeframe}
 Direction: {trade.direction}
 Open Price: {trade.open_price}
 Current Price: {trade.current_price}
-Unrealized PnL: {pnl:.2f}
-Approx ATR: {atr:.2f}
-Candle Count 1: {len(trade.candles1)}
-Candle Count 2: {len(trade.candles2)}
 
-Respond strictly with one of:
-{{ "action": "hold" }}
-{{ "action": "close" }}
-{{ "action": "trail_sl", "new_sl": 2350.0 }}
+--- Indicators ---
+RSI: {ind.rsi}
+ADX: {ind.adx}
+ATR: {ind.atr}
+MACD: main={ind.macd.main}, signal={ind.macd.signal}
+
+--- Position ---
+Direction: {pos.direction if pos else "none"}
+Lot Size: {pos.lot if pos else "n/a"}
+Floating PnL: {pos.pnl if pos else "n/a"}
+
+--- Account ---
+Balance: {acc.balance}
+
+Respond with one:
+{{"action": "hold"}}
+{{"action": "close"}}
+{{"action": "trail_sl", "new_sl": 2345.0}}
+{{"action": "martingale", "lot": 0.2}}
 """
 
     try:
-        # Use legacy or v1 OpenAI client
-        client = openai.OpenAI() if hasattr(openai, "OpenAI") else openai
-
-        response = client.ChatCompletion.create(
-            model="gpt-4",
+        client = openai.OpenAI()  # OpenAI v1 client
+        chat = client.chat.completions.create(
+            model="gpt-3.5-turbo",  # Use "gpt-4" if you upgrade
             messages=[
-                { "role": "system", "content": "You are a disciplined trade manager focused on risk and edge." },
+                { "role": "system", "content": "You are a disciplined, risk-aware trading assistant." },
                 { "role": "user", "content": prompt }
             ],
             max_tokens=100,
             temperature=0.3
         )
+        decision = chat.choices[0].message.content.strip()
+        logging.info(f"🎯 GPT Decision: {decision}")
 
-        text = response.choices[0].message.content.strip()
-        logging.info(f"🎯 GPT Response: {text}")
-
-        return eval(text) if text.startswith("{") else { "action": "hold" }
+        if decision.startswith("{"):
+            return JSONResponse(content=eval(decision))
+        else:
+            return JSONResponse(content={ "action": "hold", "raw": decision })
 
     except Exception as e:
-        logging.error(f"❌ GPT error: {str(e)}")
-        return { "action": "hold", "error": str(e) }
+        logging.error(f"❌ GPT Error: {str(e)}")
+        return JSONResponse(content={ "action": "hold", "error": str(e) })
