@@ -154,7 +154,7 @@ Respond ONLY in JSON with one of these:
     try:
         client = openai.OpenAI()
         chat = client.chat.completions.create(
-            model="gpt-3.5-turbo",   # "gpt-3.5-turbo" is ok for cheaper use
+            model="gpt-4o",   # "gpt-3.5-turbo" is ok for cheaper use
             messages=[
                 {"role": "system", "content": "You are a disciplined, risk-aware trading assistant. Only reply with a single valid JSON object, never markdown."},
                 {"role": "user", "content": prompt}
