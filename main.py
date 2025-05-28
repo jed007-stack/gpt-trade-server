@@ -5,16 +5,13 @@ from fastapi.responses import JSONResponse
 import openai
 import os
 import logging
-import requests
-from datetime import datetime, timedelta
 
-# === SETUP ===
+# === Setup ===
 openai.api_key = os.getenv("OPENAI_API_KEY")
-FMP_API_KEY = os.getenv("FMP_API_KEY")  # Get FMP key from environment
 app = FastAPI()
 logging.basicConfig(level=logging.INFO)
 
-# === DATA MODELS ===
+# === Data Models ===
 class MACD(BaseModel):
     main: float
     signal: float
@@ -24,6 +21,8 @@ class Indicators(BaseModel):
     adx: float
     atr: float
     macd: MACD
+    sma100: Optional[float] = None
+    ema40: Optional[float] = None
 
 class Candle(BaseModel):
     open: float
@@ -63,62 +62,37 @@ class TradeData(BaseModel):
 class TradeWrapper(BaseModel):
     data: TradeData
 
-# === Helper: Symbol → Currency Pair (for news) ===
-def extract_currency(symbol):
-    # For XAUUSD, EURUSD, GBPJPY etc, extract main currencies
-    majors = ["USD", "EUR", "GBP", "JPY", "AUD", "NZD", "CAD", "CHF", "XAU", "XAG"]
-    found = [c for c in majors if c in symbol.upper()]
-    return found if found else [symbol.upper()]
-
-# === FMP News Query ===
-def check_relevant_news(symbol):
-    """Returns True if there is high-impact news in the next 2 hours for either currency in the pair."""
-    if not FMP_API_KEY:
-        logging.warning("No FMP_API_KEY set, skipping news check.")
-        return False  # allow trading if no key
-    try:
-        currs = extract_currency(symbol)
-        now = datetime.utcnow()
-        window = now + timedelta(hours=2)
-        url = f"https://financialmodelingprep.com/api/v4/economic_calendar?from={now.date()}&to={window.date()}&apikey={FMP_API_KEY}"
-        res = requests.get(url)
-        if res.status_code != 200:
-            logging.warning("FMP API error: " + res.text)
-            return False
-        events = res.json()
-        for ev in events:
-            if "country" not in ev or "event" not in ev:
-                continue
-            event_time = datetime.strptime(ev.get("date"), "%Y-%m-%d %H:%M:%S")
-            if now <= event_time <= window:
-                # Look for symbol match or major currency match in event name/country
-                if any(c in ev.get("event", "") for c in currs) or any(c in ev.get("country", "") for c in currs):
-                    if ev.get("impact", "").lower() in ["high", "3"]:  # FMP sometimes uses numbers
-                        logging.warning(f"🛑 High-impact news for {currs}: {ev.get('event')}")
-                        return True
-        return False
-    except Exception as e:
-        logging.error(f"News API error: {str(e)}")
-        return False
-
-# === MAIN ENDPOINT ===
+# === GPT Manager ===
 @app.post("/gpt/manage")
 async def gpt_manage(wrapper: TradeWrapper):
     trade = wrapper.data
     ind = trade.indicators
     pos = trade.position
     acc = trade.account or Account(balance=10000, equity=10000)
+    candles = trade.candles1[-5:] if trade.candles1 else []
 
-    # Check for high-impact news (returns True = should skip trade)
-    if check_relevant_news(trade.symbol):
-        return JSONResponse(content={"action": "hold", "reason": "High-impact news detected, no trading"})
+    logging.info(f"✅ {trade.symbol} | Dir: {trade.direction} | {trade.open_price} → {trade.current_price}")
+    logging.info(f"📊 RSI: {ind.rsi}, ADX: {ind.adx}, ATR: {ind.atr}, MACD: {ind.macd.main}/{ind.macd.signal} | SMA100: {ind.sma100}, EMA40: {ind.ema40}")
 
+    # If news override, avoid all trading
     if trade.news_override:
         logging.warning("🛑 News conflict detected. GPT override active.")
         return JSONResponse(content={"action": "hold", "reason": "News conflict — override active"})
 
+    # ==== SYSTEM + USER PROMPT ====
     prompt = f"""
-You are an expert forex trade manager AI. Make decisions based on price, indicators, and position risk.
+You are a professional algorithmic trade manager for forex and gold. 
+Make decisions using the current position, price, up to 50 recent candles, all indicators, and account risk. 
+If the market is not favorable, you must 'hold'. 
+If there is an open position and indicators favor reversal, you may 'close'. 
+If the trade is in profit, you may 'trail_sl' to lock in gains. 
+If a recovery/martingale entry is safe (losing position, indicators favor reversal or bounce), you may 'martingale' with a specified lot size. 
+If a new trade should be opened, use 'buy' or 'sell' and lot. 
+If no action, always reply with 'hold'. 
+NEVER take risky recovery if account equity is at risk. 
+Make decisions step by step, and always use indicators AND recent candle structure.
+
+Here is the live data:
 
 Symbol: {trade.symbol}
 Timeframe: {trade.timeframe}
@@ -131,40 +105,51 @@ RSI: {ind.rsi}
 ADX: {ind.adx}
 ATR: {ind.atr}
 MACD: main={ind.macd.main}, signal={ind.macd.signal}
+SMA100: {ind.sma100}
+EMA40: {ind.ema40}
 
 --- Position ---
-Direction: {pos.direction if pos else "none"}
-Lot Size: {pos.lot if pos else "n/a"}
-Floating PnL: {pos.pnl if pos else "n/a"}
+{f"Direction: {pos.direction}, Lot: {pos.lot}, PnL: {pos.pnl}, SL: {pos.sl}, TP: {pos.tp}" if pos else "None"}
 
 --- Account ---
-Balance: {acc.balance}
-Equity: {acc.equity}
+Balance: {acc.balance}, Equity: {acc.equity}, Margin: {acc.margin}
 
-Respond ONLY with one of the following:
+--- Candles (last 5 shown) ---
+{[{"o": c.open, "h": c.high, "l": c.low, "c": c.close, "v": c.volume} for c in candles]}
+
+Respond ONLY in JSON with one of these:
 {{"action": "hold"}}
 {{"action": "close"}}
 {{"action": "trail_sl", "new_sl": 2345.0}}
 {{"action": "martingale", "lot": 0.2}}
+{{"action": "buy", "lot": 0.2}}
+{{"action": "sell", "lot": 0.2}}
 """
 
     try:
         client = openai.OpenAI()
         chat = client.chat.completions.create(
-            model="gpt-3.5-turbo",
+            model="gpt-4o",   # Upgrade for better reasoning; fallback: "gpt-3.5-turbo"
             messages=[
                 {"role": "system", "content": "You are a disciplined, risk-aware trading assistant."},
                 {"role": "user", "content": prompt}
             ],
             max_tokens=100,
-            temperature=0.3
+            temperature=0.2
         )
         decision = chat.choices[0].message.content.strip()
         logging.info(f"🎯 GPT Decision: {decision}")
 
-        if decision.startswith("{"):
-            return JSONResponse(content=eval(decision))
-        else:
+        # Safety: Only allow allowed actions
+        allowed = ["hold", "close", "trail_sl", "martingale", "buy", "sell"]
+        import json
+        try:
+            d = json.loads(decision)
+            if "action" in d and d["action"] in allowed:
+                return JSONResponse(content=d)
+            else:
+                return JSONResponse(content={"action": "hold", "raw": decision})
+        except Exception:
             return JSONResponse(content={"action": "hold", "raw": decision})
 
     except Exception as e:
