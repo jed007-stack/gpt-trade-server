@@ -5,6 +5,8 @@ from fastapi.responses import JSONResponse
 import openai
 import os
 import logging
+import json
+import re
 
 # === Setup ===
 openai.api_key = os.getenv("OPENAI_API_KEY")
@@ -62,6 +64,31 @@ class TradeData(BaseModel):
 class TradeWrapper(BaseModel):
     data: TradeData
 
+# === Helper: Flatten GPT response
+def flatten_action(decision):
+    # If it's already a dict with 'action'
+    if isinstance(decision, dict) and "action" in decision:
+        return decision
+    # If it's a string in code or markdown
+    if isinstance(decision, str):
+        cleaned = re.sub(r"```(\w+)?", "", decision).strip()
+        try:
+            d = json.loads(cleaned)
+            if "action" in d:
+                return d
+        except Exception:
+            pass
+    # If it has 'raw', try to extract from there
+    if isinstance(decision, dict) and "raw" in decision:
+        cleaned = re.sub(r"```(\w+)?", "", decision["raw"]).strip()
+        try:
+            d = json.loads(cleaned)
+            if "action" in d:
+                return d
+        except Exception:
+            pass
+    return {"action": "hold"}
+
 # === GPT Manager ===
 @app.post("/gpt/manage")
 async def gpt_manage(wrapper: TradeWrapper):
@@ -79,7 +106,6 @@ async def gpt_manage(wrapper: TradeWrapper):
         logging.warning("🛑 News conflict detected. GPT override active.")
         return JSONResponse(content={"action": "hold", "reason": "News conflict — override active"})
 
-    # ==== SYSTEM + USER PROMPT ====
     prompt = f"""
 You are a professional algorithmic trade manager for forex and gold. 
 Make decisions using the current position, price, up to 50 recent candles, all indicators, and account risk. 
@@ -125,33 +151,33 @@ Respond ONLY in JSON with one of these:
 {{"action": "buy", "lot": 0.2}}
 {{"action": "sell", "lot": 0.2}}
 """
-
     try:
         client = openai.OpenAI()
         chat = client.chat.completions.create(
-            model="gpt-4o",   # Upgrade for better reasoning; fallback: "gpt-3.5-turbo"
+            model="gpt-3.5-turbo",   # "gpt-3.5-turbo" is ok for cheaper use
             messages=[
-                {"role": "system", "content": "You are a disciplined, risk-aware trading assistant."},
+                {"role": "system", "content": "You are a disciplined, risk-aware trading assistant. Only reply with a single valid JSON object, never markdown."},
                 {"role": "user", "content": prompt}
             ],
             max_tokens=100,
             temperature=0.2
         )
         decision = chat.choices[0].message.content.strip()
-        logging.info(f"🎯 GPT Decision: {decision}")
+        logging.info(f"🎯 GPT Decision (raw): {decision}")
 
-        # Safety: Only allow allowed actions
+        # Flatten the response so it works no matter how GPT formats it
         allowed = ["hold", "close", "trail_sl", "martingale", "buy", "sell"]
-        import json
-        try:
-            d = json.loads(decision)
-            if "action" in d and d["action"] in allowed:
-                return JSONResponse(content=d)
-            else:
-                return JSONResponse(content={"action": "hold", "raw": decision})
-        except Exception:
+        action = flatten_action(decision)
+        if action.get("action") in allowed:
+            return JSONResponse(content=action)
+        else:
             return JSONResponse(content={"action": "hold", "raw": decision})
 
     except Exception as e:
         logging.error(f"❌ GPT Error: {str(e)}")
         return JSONResponse(content={"action": "hold", "error": str(e)})
+
+# Health check
+@app.get("/")
+async def root():
+    return {"message": "GPT Trade Server running!"}
