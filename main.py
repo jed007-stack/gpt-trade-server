@@ -5,13 +5,16 @@ from fastapi.responses import JSONResponse
 import openai
 import os
 import logging
+import requests
+from datetime import datetime, timedelta
 
-# === Setup ===
+# === SETUP ===
 openai.api_key = os.getenv("OPENAI_API_KEY")
+FMP_API_KEY = os.getenv("FMP_API_KEY")  # Get FMP key from environment
 app = FastAPI()
 logging.basicConfig(level=logging.INFO)
 
-# === Data Models ===
+# === DATA MODELS ===
 class MACD(BaseModel):
     main: float
     signal: float
@@ -60,7 +63,45 @@ class TradeData(BaseModel):
 class TradeWrapper(BaseModel):
     data: TradeData
 
-# === GPT Manager ===
+# === Helper: Symbol → Currency Pair (for news) ===
+def extract_currency(symbol):
+    # For XAUUSD, EURUSD, GBPJPY etc, extract main currencies
+    majors = ["USD", "EUR", "GBP", "JPY", "AUD", "NZD", "CAD", "CHF", "XAU", "XAG"]
+    found = [c for c in majors if c in symbol.upper()]
+    return found if found else [symbol.upper()]
+
+# === FMP News Query ===
+def check_relevant_news(symbol):
+    """Returns True if there is high-impact news in the next 2 hours for either currency in the pair."""
+    if not FMP_API_KEY:
+        logging.warning("No FMP_API_KEY set, skipping news check.")
+        return False  # allow trading if no key
+    try:
+        currs = extract_currency(symbol)
+        now = datetime.utcnow()
+        window = now + timedelta(hours=2)
+        url = f"https://financialmodelingprep.com/api/v4/economic_calendar?from={now.date()}&to={window.date()}&apikey={FMP_API_KEY}"
+        res = requests.get(url)
+        if res.status_code != 200:
+            logging.warning("FMP API error: " + res.text)
+            return False
+        events = res.json()
+        for ev in events:
+            if "country" not in ev or "event" not in ev:
+                continue
+            event_time = datetime.strptime(ev.get("date"), "%Y-%m-%d %H:%M:%S")
+            if now <= event_time <= window:
+                # Look for symbol match or major currency match in event name/country
+                if any(c in ev.get("event", "") for c in currs) or any(c in ev.get("country", "") for c in currs):
+                    if ev.get("impact", "").lower() in ["high", "3"]:  # FMP sometimes uses numbers
+                        logging.warning(f"🛑 High-impact news for {currs}: {ev.get('event')}")
+                        return True
+        return False
+    except Exception as e:
+        logging.error(f"News API error: {str(e)}")
+        return False
+
+# === MAIN ENDPOINT ===
 @app.post("/gpt/manage")
 async def gpt_manage(wrapper: TradeWrapper):
     trade = wrapper.data
@@ -68,8 +109,9 @@ async def gpt_manage(wrapper: TradeWrapper):
     pos = trade.position
     acc = trade.account or Account(balance=10000, equity=10000)
 
-    logging.info(f"✅ {trade.symbol} | Dir: {trade.direction} | {trade.open_price} → {trade.current_price}")
-    logging.info(f"📊 RSI: {ind.rsi}, ADX: {ind.adx}, ATR: {ind.atr}, MACD: {ind.macd.main}/{ind.macd.signal}")
+    # Check for high-impact news (returns True = should skip trade)
+    if check_relevant_news(trade.symbol):
+        return JSONResponse(content={"action": "hold", "reason": "High-impact news detected, no trading"})
 
     if trade.news_override:
         logging.warning("🛑 News conflict detected. GPT override active.")
