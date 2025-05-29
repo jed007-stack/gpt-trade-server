@@ -20,7 +20,6 @@ class MACD(BaseModel):
 
 class Indicators(BaseModel):
     rsi: float
-    adx: float
     atr: float
     macd: MACD
     sma100: Optional[float] = None
@@ -99,7 +98,10 @@ async def gpt_manage(wrapper: TradeWrapper):
     candles = trade.candles1[-5:] if trade.candles1 else []
 
     logging.info(f"✅ {trade.symbol} | Dir: {trade.direction} | {trade.open_price} → {trade.current_price}")
-    logging.info(f"📊 RSI: {ind.rsi}, ADX: {ind.adx}, ATR: {ind.atr}, MACD: {ind.macd.main}/{ind.macd.signal} | SMA100: {ind.sma100}, EMA40: {ind.ema40}")
+    logging.info(
+        f"📊 RSI: {ind.rsi}, ATR: {ind.atr}, MACD: {ind.macd.main}/{ind.macd.signal} | "
+        f"SMA100: {ind.sma100}, EMA40: {ind.ema40}"
+    )
 
     # If news override, avoid all trading
     if trade.news_override:
@@ -107,15 +109,15 @@ async def gpt_manage(wrapper: TradeWrapper):
         return JSONResponse(content={"action": "hold", "reason": "News conflict — override active"})
 
     prompt = f"""
-You are a professional algorithmic trade manager for forex and gold. 
-Make decisions using the current position, price, up to 50 recent candles, all indicators, and account risk. 
-If the market is not favorable, you must 'hold'. 
-If there is an open position and indicators favor reversal, you may 'close'. 
-If the trade is in profit, you may 'trail_sl' to lock in gains. 
-If a recovery/martingale entry is safe (losing position, indicators favor reversal or bounce), you may 'martingale' with a specified lot size. 
-If a new trade should be opened, use 'buy' or 'sell' and lot. 
-If no action, always reply with 'hold'. 
-NEVER take risky recovery if account equity is at risk. 
+You are a professional algorithmic trade manager for forex and gold.
+Make decisions using the current position, price, up to 50 recent candles, all indicators, and account risk.
+If the market is not favorable, you must 'hold'.
+If there is an open position and indicators favor reversal, you may 'close'.
+If the trade is in profit, you may 'trail_sl' to lock in gains.
+If a recovery/martingale entry is safe (losing position, indicators favor reversal or bounce), you may 'martingale' with a specified lot size.
+If a new trade should be opened, use 'buy' or 'sell' and lot.
+If no action, always reply with 'hold'.
+NEVER take risky recovery if account equity is at risk.
 Make decisions step by step, and always use indicators AND recent candle structure.
 
 Here is the live data:
@@ -128,7 +130,6 @@ Current Price: {trade.current_price}
 
 --- Indicators ---
 RSI: {ind.rsi}
-ADX: {ind.adx}
 ATR: {ind.atr}
 MACD: main={ind.macd.main}, signal={ind.macd.signal}
 SMA100: {ind.sma100}
@@ -141,7 +142,7 @@ EMA40: {ind.ema40}
 Balance: {acc.balance}, Equity: {acc.equity}, Margin: {acc.margin}
 
 --- Candles (last 5 shown) ---
-{[{"o": c.open, "h": c.high, "l": c.low, "c": c.close, "v": c.volume} for c in candles]}
+{[{'o': c.open, 'h': c.high, 'l': c.low, 'c': c.close, 'v': c.volume} for c in candles]}
 
 Respond ONLY in JSON with one of these:
 {{"action": "hold"}}
@@ -151,10 +152,11 @@ Respond ONLY in JSON with one of these:
 {{"action": "buy", "lot": 0.2}}
 {{"action": "sell", "lot": 0.2}}
 """
+
     try:
         client = openai.OpenAI()
         chat = client.chat.completions.create(
-            model="gpt-4o",   # "gpt-3.5-turbo" is ok for cheaper use
+            model="gpt-4o",
             messages=[
                 {"role": "system", "content": "You are a disciplined, risk-aware trading assistant. Only reply with a single valid JSON object, never markdown."},
                 {"role": "user", "content": prompt}
@@ -165,7 +167,6 @@ Respond ONLY in JSON with one of these:
         decision = chat.choices[0].message.content.strip()
         logging.info(f"🎯 GPT Decision (raw): {decision}")
 
-        # Flatten the response so it works no matter how GPT formats it
         allowed = ["hold", "close", "trail_sl", "martingale", "buy", "sell"]
         action = flatten_action(decision)
         if action.get("action") in allowed:
