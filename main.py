@@ -63,7 +63,7 @@ class TradeData(BaseModel):
 class TradeWrapper(BaseModel):
     data: TradeData
 
-# === Helper: Flatten GPT response
+# === Helper: Flatten GPT response ===
 def flatten_action(decision):
     # If it's already a dict with 'action'
     if isinstance(decision, dict) and "action" in decision:
@@ -86,7 +86,7 @@ def flatten_action(decision):
                 return d
         except Exception:
             pass
-    return {"action": "hold"}
+    return {"action": "hold", "reason": "Could not decode action."}
 
 # === GPT Manager ===
 @app.post("/gpt/manage")
@@ -109,7 +109,7 @@ async def gpt_manage(wrapper: TradeWrapper):
         return JSONResponse(content={"action": "hold", "reason": "News conflict — override active"})
 
     prompt = f"""
-You are a professional algorithmic trade manager for forex and gold.
+You are a professional algorithmic trade manager for forex and gold and crypto.
 Make decisions using the current position, price, up to 50 recent candles, all indicators, and account risk.
 If the market is not favorable, you must 'hold'.
 If there is an open position and indicators favor reversal, you may 'close'.
@@ -144,13 +144,13 @@ Balance: {acc.balance}, Equity: {acc.equity}, Margin: {acc.margin}
 --- Candles (last 5 shown) ---
 {[{'o': c.open, 'h': c.high, 'l': c.low, 'c': c.close, 'v': c.volume} for c in candles]}
 
-Respond ONLY in JSON with one of these:
-{{"action": "hold"}}
-{{"action": "close"}}
-{{"action": "trail_sl", "new_sl": 2345.0}}
-{{"action": "martingale", "lot": 0.2}}
-{{"action": "buy", "lot": 0.2}}
-{{"action": "sell", "lot": 0.2}}
+Respond ONLY in JSON like this, always including a short one-sentence reason:
+{{"action": "hold", "reason": "RSI is overbought, so it's not a good entry."}}
+{{"action": "close", "reason": "Price has reversed against our position."}}
+{{"action": "trail_sl", "new_sl": 2345.0, "reason": "Locking in profit as price moves in our favor."}}
+{{"action": "martingale", "lot": 0.2, "reason": "Position is in loss but indicators show a bounce is likely."}}
+{{"action": "buy", "lot": 0.2, "reason": "Strong crossover and bullish momentum."}}
+{{"action": "sell", "lot": 0.2, "reason": "Bearish crossover and weak price structure."}}
 """
 
     try:
@@ -161,7 +161,7 @@ Respond ONLY in JSON with one of these:
                 {"role": "system", "content": "You are a disciplined, risk-aware trading assistant. Only reply with a single valid JSON object, never markdown."},
                 {"role": "user", "content": prompt}
             ],
-            max_tokens=100,
+            max_tokens=120,
             temperature=0.2
         )
         decision = chat.choices[0].message.content.strip()
@@ -170,13 +170,14 @@ Respond ONLY in JSON with one of these:
         allowed = ["hold", "close", "trail_sl", "martingale", "buy", "sell"]
         action = flatten_action(decision)
         if action.get("action") in allowed:
+            logging.info(f"📝 GPT Action: {action.get('action')} | Reason: {action.get('reason','(none)')}")
             return JSONResponse(content=action)
         else:
-            return JSONResponse(content={"action": "hold", "raw": decision})
+            return JSONResponse(content={"action": "hold", "reason": f"Could not decode: {decision}"})
 
     except Exception as e:
         logging.error(f"❌ GPT Error: {str(e)}")
-        return JSONResponse(content={"action": "hold", "error": str(e)})
+        return JSONResponse(content={"action": "hold", "reason": str(e)})
 
 # Health check
 @app.get("/")
