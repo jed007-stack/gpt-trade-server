@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from fastapi.responses import JSONResponse
 import openai
 import os
@@ -14,9 +14,16 @@ app = FastAPI()
 logging.basicConfig(level=logging.INFO)
 
 # === Data Models ===
+
 class MACD(BaseModel):
     main: float
     signal: float
+
+class Ichimoku(BaseModel):
+    tenkan: float
+    kijun: float
+    senkou_a: float
+    senkou_b: float
 
 class Indicators(BaseModel):
     bb_upper: float
@@ -24,10 +31,19 @@ class Indicators(BaseModel):
     bb_lower: float
     stoch_k: float
     stoch_d: float
-    stoch_j: float
+    stoch_j: Optional[float]
     macd: MACD
     sma100: Optional[float]
     ema40: Optional[float]
+    adx: Optional[float]
+    mfi: Optional[float]
+    williams_r: Optional[float]
+    ichimoku: Optional[Ichimoku]
+    rsi_array: Optional[List[float]]
+    price_array: Optional[List[float]]
+    support_resistance: Optional[Dict[str, List[float]]] = None
+    fibonacci: Optional[Dict[str, Any]] = None
+    candlestick_patterns: Optional[List[str]] = None
 
 class Candle(BaseModel):
     open: float
@@ -52,15 +68,16 @@ class Account(BaseModel):
 class TradeData(BaseModel):
     symbol: str
     timeframe: str
-    direction: str
-    open_price: float
-    current_price: float
+    direction: Optional[str] = None
+    open_price: Optional[float] = None
+    current_price: Optional[float] = None
     news_override: Optional[bool] = False
     indicators: Indicators
     position: Optional[Position] = None
     account: Optional[Account] = None
     candles1: Optional[List[Candle]] = []
     candles2: Optional[List[Candle]] = []
+    candles3: Optional[List[Candle]] = []
     live_candle1: Optional[Candle] = None
     live_candle2: Optional[Candle] = None
 
@@ -101,9 +118,12 @@ async def gpt_manage(wrapper: TradeWrapper):
     logging.info(f"✅ {trade.symbol} | Dir: {trade.direction} | {trade.open_price} → {trade.current_price}")
     logging.info(
         f"📊 BB: ({ind.bb_upper}, {ind.bb_middle}, {ind.bb_lower}) | "
-        f"Stoch: K={ind.stoch_k}, D={ind.stoch_d}, J={ind.stoch_j} | "
+        f"Stoch: K={ind.stoch_k}, D={ind.stoch_d}, J={getattr(ind, 'stoch_j', None)} | "
         f"MACD: {ind.macd.main}/{ind.macd.signal} | "
-        f"SMA100: {ind.sma100}, EMA40: {ind.ema40}"
+        f"SMA100: {ind.sma100}, EMA40: {ind.ema40} | "
+        f"ADX: {getattr(ind, 'adx', None)} | "
+        f"MFI: {getattr(ind, 'mfi', None)} | Williams %R: {getattr(ind, 'williams_r', None)} | "
+        f"Ichimoku: {ind.ichimoku.dict() if ind.ichimoku else None}"
     )
 
     if trade.news_override:
@@ -120,7 +140,7 @@ async def gpt_manage(wrapper: TradeWrapper):
 You are an expert, risk-aware, but active algorithmic trade manager.
 Your goals:
 - Only trade when there is a valid edge, but act quickly when strong signals appear.
-- If all indicators (BB, Stoch, MACD, SMA, EMA, candle context) point the same direction, respond with a high-confidence signal and set "lot":2.
+- If all indicators (BB, Stoch, MACD, SMA, EMA, ADX, MFI, Williams %R, Ichimoku, RSI, S/R, fib, candle context) point the same direction, respond with a high-confidence signal and set "lot":2.
 - If the signal is just decent, use "lot":1.
 - Always consider open trades: never flip directions unless the reversal is clear and strong; otherwise, signal "close" or "hold".
 - Do NOT add to positions in the same direction if one is already open; just "hold" or "trail_sl".
@@ -148,10 +168,19 @@ Open Price: {trade.open_price}
 Current Price: {trade.current_price}
 Indicators: 
   BB: {ind.bb_upper}/{ind.bb_middle}/{ind.bb_lower}
-  Stoch K/D/J: {ind.stoch_k}/{ind.stoch_d}/{ind.stoch_j}
+  Stoch K/D/J: {ind.stoch_k}/{ind.stoch_d}/{getattr(ind, 'stoch_j', None)}
   MACD: {ind.macd.main}/{ind.macd.signal}
   SMA100: {ind.sma100}
   EMA40: {ind.ema40}
+  ADX: {getattr(ind, 'adx', None)}
+  MFI: {getattr(ind, 'mfi', None)}
+  Williams %R: {getattr(ind, 'williams_r', None)}
+  Ichimoku: {ind.ichimoku.dict() if ind.ichimoku else None}
+  RSI Array: {ind.rsi_array}
+  Price Array: {ind.price_array}
+  Support/Resistance: {ind.support_resistance}
+  Fibonacci: {ind.fibonacci}
+  Candlestick Patterns: {ind.candlestick_patterns}
 """
 
     try:
@@ -163,7 +192,7 @@ Indicators:
                 {"role": "user", "content": prompt}
             ],
             max_tokens=120,
-            temperature=0.22  # Slightly more adventurous than default, still safe
+            temperature=0.22
         )
         decision = chat.choices[0].message.content.strip()
         logging.info(f"🎯 GPT Decision (raw): {decision}")
@@ -186,3 +215,4 @@ Indicators:
 @app.get("/")
 async def root():
     return {"message": "SmartGPT EA Trade Server running!"}
+
