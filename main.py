@@ -110,7 +110,13 @@ async def gpt_manage(wrapper: TradeWrapper):
         logging.warning("🛑 News conflict detected. GPT override active.")
         return JSONResponse(content={"action": "hold", "reason": "News conflict — override active"})
 
-    # Build prompt based on SmartGPT_EA's data layout
+    # === AUTO TAKE PROFIT LOGIC (edit profit target below) ===
+    # If position exists and is over +10 USD profit, auto-close!
+    if pos and pos.pnl is not None and pos.pnl >= 10.0:
+        logging.info(f"💰 Auto-close: Profit target hit ({pos.pnl} USD)")
+        return JSONResponse(content={"action": "close", "reason": f"Take profit: {pos.pnl:.2f} USD"})
+
+    # === GPT Prompt logic ===
     prompt = f"""
 You are a professional algorithmic trade manager for forex, gold, and crypto.
 Decide the best action: 'hold', 'close', 'trail_sl', 'martingale', 'buy', or 'sell'.
