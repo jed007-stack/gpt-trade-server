@@ -111,40 +111,47 @@ async def gpt_manage(wrapper: TradeWrapper):
         return JSONResponse(content={"action": "hold", "reason": "News conflict — override active"})
 
     # === AUTO TAKE PROFIT LOGIC (edit profit target below) ===
-    # If position exists and is over +10 USD profit, auto-close!
     if pos and pos.pnl is not None and pos.pnl >= 10.0:
         logging.info(f"💰 Auto-close: Profit target hit ({pos.pnl} USD)")
         return JSONResponse(content={"action": "close", "reason": f"Take profit: {pos.pnl:.2f} USD"})
 
-    # === GPT Prompt logic ===
+    # === GPT Prompt logic (aggressive, but smart and risk-aware) ===
     prompt = f"""
-You are a professional algorithmic trade manager for forex, gold, and crypto.
-Decide the best action: 'hold', 'close', 'trail_sl', 'martingale', 'buy', or 'sell'.
-Use all available data: position, price, up to 50 candles, indicators, and risk/account info.
-Only reply in one JSON object. If market is not favorable, always 'hold'.
+You are an expert, risk-aware, but active algorithmic trade manager.
+Your goals:
+- Only trade when there is a valid edge, but act quickly when strong signals appear.
+- If all indicators (BB, Stoch, MACD, SMA, EMA, candle context) point the same direction, respond with a high-confidence signal and set "lot":2.
+- If the signal is just decent, use "lot":1.
+- Always consider open trades: never flip directions unless the reversal is clear and strong; otherwise, signal "close" or "hold".
+- Do NOT add to positions in the same direction if one is already open; just "hold" or "trail_sl".
+- If a position is already open, only "close", "hold", or "trail_sl" unless a strong reversal appears.
+- Never "martingale" unless the trend truly resumes after a drawdown (rare).
+- Never expose account to over-risk; only use "lot":2 when all evidence is strong.
+- Use "hold" if market is choppy, mixed, or low-confidence.
 
-Live Data:
+Always return a JSON object with "action", "lot" (if buy/sell/martingale), and a brief "reason".
+For example:
+{{"action":"buy","lot":2,"reason":"All indicators very bullish, strong breakout."}}
+{{"action":"sell","lot":1,"reason":"MACD and Stoch bearish, but BB not perfect."}}
+{{"action":"close","reason":"Take profit hit."}}
+{{"action":"trail_sl","new_sl":2345.0,"reason":"Lock in gains."}}
+{{"action":"hold","reason":"Choppy market, mixed signals."}}
+
+Current Position: {pos.dict() if pos else "None"}
+Current Account: {acc.dict() if acc else "None"}
+Recent Candles: {[candle.dict() for candle in candles]}
+
+Market Data:
 Symbol: {trade.symbol}
 Timeframe: {trade.timeframe}
-Direction: {trade.direction}
 Open Price: {trade.open_price}
 Current Price: {trade.current_price}
 Indicators: 
-  BB (Upper/Mid/Lower): {ind.bb_upper}/{ind.bb_middle}/{ind.bb_lower}
-  Stoch (K/D/J): {ind.stoch_k}/{ind.stoch_d}/{ind.stoch_j}
+  BB: {ind.bb_upper}/{ind.bb_middle}/{ind.bb_lower}
+  Stoch K/D/J: {ind.stoch_k}/{ind.stoch_d}/{ind.stoch_j}
   MACD: {ind.macd.main}/{ind.macd.signal}
-  SMA100: {ind.sma100}, EMA40: {ind.ema40}
-Position: {pos.dict() if pos else "None"}
-Account: {acc.dict() if acc else "None"}
-Recent Candles: {[candle.dict() for candle in candles]}
-
-ALWAYS respond in JSON with a brief reason, e.g.:
-{{"action":"hold", "reason":"No valid setup."}}
-{{"action":"close", "reason":"Price reversed."}}
-{{"action":"trail_sl", "new_sl":2345.0, "reason":"Trailing stop for profit."}}
-{{"action":"martingale", "lot":0.2, "reason":"Martingale recovery."}}
-{{"action":"buy", "lot":0.2, "reason":"Buy signal."}}
-{{"action":"sell", "lot":0.2, "reason":"Sell signal."}}
+  SMA100: {ind.sma100}
+  EMA40: {ind.ema40}
 """
 
     try:
@@ -152,19 +159,22 @@ ALWAYS respond in JSON with a brief reason, e.g.:
         chat = client.chat.completions.create(
             model="gpt-4o",
             messages=[
-                {"role": "system", "content": "You are a disciplined, risk-aware trading assistant. Reply with a single valid JSON object, never markdown."},
+                {"role": "system", "content": "You are a disciplined, but active, risk-aware trading assistant. Reply with a single valid JSON object, never markdown."},
                 {"role": "user", "content": prompt}
             ],
             max_tokens=120,
-            temperature=0.15
+            temperature=0.22  # Slightly more adventurous than default, still safe
         )
         decision = chat.choices[0].message.content.strip()
         logging.info(f"🎯 GPT Decision (raw): {decision}")
 
         allowed = {"hold", "close", "trail_sl", "martingale", "buy", "sell"}
         action = flatten_action(decision)
+        # Default to "lot":1 if not specified on buy/sell
+        if action.get("action") in {"buy", "sell", "martingale"} and "lot" not in action:
+            action["lot"] = 1
         if action.get("action") in allowed:
-            logging.info(f"📝 GPT Action: {action.get('action')} | Reason: {action.get('reason','(none)')}")
+            logging.info(f"📝 GPT Action: {action.get('action')} | Lot: {action.get('lot', 1)} | Reason: {action.get('reason','(none)')}")
             return JSONResponse(content=action)
         else:
             return JSONResponse(content={"action": "hold", "reason": f"Could not decode: {decision}"})
