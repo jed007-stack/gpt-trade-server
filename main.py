@@ -19,8 +19,12 @@ class MACD(BaseModel):
     signal: float
 
 class Indicators(BaseModel):
-    rsi: float
-    atr: float
+    bb_upper: float
+    bb_middle: float
+    bb_lower: float
+    stoch_k: float
+    stoch_d: float
+    stoch_j: float
     macd: MACD
     sma100: Optional[float]
     ema40: Optional[float]
@@ -96,7 +100,9 @@ async def gpt_manage(wrapper: TradeWrapper):
 
     logging.info(f"✅ {trade.symbol} | Dir: {trade.direction} | {trade.open_price} → {trade.current_price}")
     logging.info(
-        f"📊 RSI: {ind.rsi}, ATR: {ind.atr}, MACD: {ind.macd.main}/{ind.macd.signal} | "
+        f"📊 BB: ({ind.bb_upper}, {ind.bb_middle}, {ind.bb_lower}) | "
+        f"Stoch: K={ind.stoch_k}, D={ind.stoch_d}, J={ind.stoch_j} | "
+        f"MACD: {ind.macd.main}/{ind.macd.signal} | "
         f"SMA100: {ind.sma100}, EMA40: {ind.ema40}"
     )
 
@@ -117,7 +123,11 @@ Timeframe: {trade.timeframe}
 Direction: {trade.direction}
 Open Price: {trade.open_price}
 Current Price: {trade.current_price}
-Indicators: RSI {ind.rsi}, ATR {ind.atr}, MACD {ind.macd.main}/{ind.macd.signal}, SMA100 {ind.sma100}, EMA40 {ind.ema40}
+Indicators: 
+  BB (Upper/Mid/Lower): {ind.bb_upper}/{ind.bb_middle}/{ind.bb_lower}
+  Stoch (K/D/J): {ind.stoch_k}/{ind.stoch_d}/{ind.stoch_j}
+  MACD: {ind.macd.main}/{ind.macd.signal}
+  SMA100: {ind.sma100}, EMA40: {ind.ema40}
 Position: {pos.dict() if pos else "None"}
 Account: {acc.dict() if acc else "None"}
 Recent Candles: {[candle.dict() for candle in candles]}
