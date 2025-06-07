@@ -130,12 +130,7 @@ async def gpt_manage(wrapper: TradeWrapper):
         logging.warning("🛑 News conflict detected. GPT override active.")
         return JSONResponse(content={"action": "hold", "reason": "News conflict — override active"})
 
-    # === AUTO TAKE PROFIT LOGIC (edit profit target below) ===
-    if pos and pos.pnl is not None and pos.pnl >= 10.0:
-        logging.info(f"💰 Auto-close: Profit target hit ({pos.pnl} USD)")
-        return JSONResponse(content={"action": "close", "reason": f"Take profit: {pos.pnl:.2f} USD"})
-
-    # === GPT Prompt logic (aggressive, but smart and risk-aware) ===
+    # === GPT Prompt logic (dynamic SL/TP and risk-aware) ===
     prompt = f"""
 You are an expert, risk-aware, but active algorithmic trade manager.
 Your goals:
@@ -144,18 +139,19 @@ Your goals:
 - If the signal is just decent, use "lot":1.
 - Always consider open trades: never flip directions unless the reversal is clear and strong; otherwise, signal "close" or "hold".
 - Do NOT add to positions in the same direction if one is already open; just "hold" or "trail_sl".
-- If a position is already open, only "close", "hold", or "trail_sl" unless a strong reversal appears.
+- If a position is already open, only "close", "hold", "trail_sl", or suggest better stop-loss/take-profit unless a strong reversal appears.
 - Never "martingale" unless the trend truly resumes after a drawdown (rare).
 - Never expose account to over-risk; only use "lot":2 when all evidence is strong.
 - Use "hold" if market is choppy, mixed, or low-confidence.
 
-Always return a JSON object with "action", "lot" (if buy/sell/martingale), and a brief "reason".
-For example:
-{{"action":"buy","lot":2,"reason":"All indicators very bullish, strong breakout."}}
-{{"action":"sell","lot":1,"reason":"MACD and Stoch bearish, but BB not perfect."}}
-{{"action":"close","reason":"Take profit hit."}}
-{{"action":"trail_sl","new_sl":2345.0,"reason":"Lock in gains."}}
-{{"action":"hold","reason":"Choppy market, mixed signals."}}
+IMPORTANT: On every response, **if you think a better stop-loss or take-profit is possible,** include "new_sl":<price> and/or "new_tp":<price> (absolute price level).  
+- You may update SL or TP even on hold, to manage risk or lock in profit.
+- Consider account size, symbol volatility, and price structure.
+- If you want to move the stop-loss to breakeven after 50 pips, or trail the stop, suggest "new_sl" at the best price.
+- Always return a JSON object (not markdown), for example:
+{{"action":"hold","new_sl":2311.50,"new_tp":2350.00,"reason":"Raising SL to breakeven, adjusting TP to top of range."}}
+{{"action":"trail_sl","new_sl":2312.00,"reason":"Locking in gains as trade moves in profit."}}
+{{"action":"close","reason":"Strong reversal and overbought."}}
 
 Current Position: {pos.dict() if pos else "None"}
 Current Account: {acc.dict() if acc else "None"}
@@ -191,17 +187,22 @@ Indicators:
                 {"role": "system", "content": "You are a disciplined, but active, risk-aware trading assistant. Reply with a single valid JSON object, never markdown."},
                 {"role": "user", "content": prompt}
             ],
-            max_tokens=120,
+            max_tokens=150,
             temperature=0.22
         )
         decision = chat.choices[0].message.content.strip()
         logging.info(f"🎯 GPT Decision (raw): {decision}")
 
-        allowed = {"hold", "close", "trail_sl", "martingale", "buy", "sell"}
+        allowed = {"hold", "close", "trail_sl", "trail_tp", "martingale", "buy", "sell"}
         action = flatten_action(decision)
         # Default to "lot":1 if not specified on buy/sell
         if action.get("action") in {"buy", "sell", "martingale"} and "lot" not in action:
             action["lot"] = 1
+
+        # Pass through new_sl and new_tp if included
+        if "new_sl" in action or "new_tp" in action:
+            logging.info(f"🛡️ SL/TP update: SL={action.get('new_sl')} | TP={action.get('new_tp')}")
+
         if action.get("action") in allowed:
             logging.info(f"📝 GPT Action: {action.get('action')} | Lot: {action.get('lot', 1)} | Reason: {action.get('reason','(none)')}")
             return JSONResponse(content=action)
@@ -215,4 +216,3 @@ Indicators:
 @app.get("/")
 async def root():
     return {"message": "SmartGPT EA Trade Server running!"}
-
