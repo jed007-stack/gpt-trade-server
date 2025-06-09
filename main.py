@@ -130,23 +130,27 @@ async def gpt_manage(wrapper: TradeWrapper):
         logging.warning("🛑 News conflict detected. GPT override active.")
         return JSONResponse(content={"action": "hold", "reason": "News conflict — override active"})
 
-    # === GPT Prompt logic (dynamic SL/TP and risk-aware) ===
+    # === Balanced, prop firm-specific patient prompt ===
     prompt = f"""
-You are an expert, risk-aware, but active algorithmic trade manager.
+You are an expert, risk-aware, but patient algorithmic trade manager.
+You are managing an account in a strict prop firm challenge (e.g., E8).
+Your primary goal is to pass the challenge as quickly and smoothly as possible **without breaking any risk rules**.
+
 Your goals:
-- Only trade when there is a valid edge, but act quickly when strong signals appear.
-- If all indicators (BB, Stoch, MACD, SMA, EMA, ADX, MFI, Williams %R, Ichimoku, RSI, S/R, fib, candle context) point the same direction, respond with a high-confidence signal and set "lot":2.
-- If the signal is just decent, use "lot":1.
-- Always consider open trades: never flip directions unless the reversal is clear and strong; otherwise, signal "close" or "hold".
+- Prefer to hold open trades until a strong, multi-indicator reversal is clear.
+- Only signal "close" when there is a very strong reversal or risk of breaching rules.
+- Avoid closing trades on minor retracements or mixed signals; be patient and trend-following.
+- Only trade when there is a valid edge, but act quickly when all strong signals align.
+- Never flip directions unless the reversal is clear and strong; otherwise, signal "close", "hold" or "trail_sl".
 - Do NOT add to positions in the same direction if one is already open; just "hold" or "trail_sl".
-- If a position is already open, only "close", "hold", "trail_sl", or suggest better stop-loss/take-profit unless a strong reversal appears.
-- Never "martingale" unless the trend truly resumes after a drawdown (rare).
+- If a position is already open, only "close", "hold", or suggest better stop-loss/take-profit unless a strong reversal appears.
+- Never martingale unless the trend truly resumes after a drawdown (rare).
 - Never expose account to over-risk; only use "lot":2 when all evidence is strong.
 - Use "hold" if market is choppy, mixed, or low-confidence.
+- **Always follow prop firm rules, especially daily and max drawdown.**
 
 IMPORTANT: On every response, **if you think a better stop-loss or take-profit is possible,** include "new_sl":<price> and/or "new_tp":<price> (absolute price level).  
 - You may update SL or TP even on hold, to manage risk or lock in profit.
-- Consider account size, symbol volatility, and price structure.
 - If you want to move the stop-loss to breakeven after 50 pips, or trail the stop, suggest "new_sl" at the best price.
 - Always return a JSON object (not markdown), for example:
 {{"action":"hold","new_sl":2311.50,"new_tp":2350.00,"reason":"Raising SL to breakeven, adjusting TP to top of range."}}
@@ -184,7 +188,7 @@ Indicators:
         chat = client.chat.completions.create(
             model="gpt-4o",
             messages=[
-                {"role": "system", "content": "You are a disciplined, but active, risk-aware trading assistant. Reply with a single valid JSON object, never markdown."},
+                {"role": "system", "content": "You are a disciplined, but patient, risk-aware trading assistant. Reply with a single valid JSON object, never markdown."},
                 {"role": "user", "content": prompt}
             ],
             max_tokens=150,
