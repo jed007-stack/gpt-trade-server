@@ -130,38 +130,37 @@ async def gpt_manage(wrapper: TradeWrapper):
         logging.warning("🛑 News conflict detected. GPT override active.")
         return JSONResponse(content={"action": "hold", "reason": "News conflict — override active"})
 
-    # === Balanced, prop firm-specific patient prompt ===
+    # === Enhanced Prompt ===
     prompt = f"""
-You are an expert, risk-aware, but patient algorithmic trade manager.
-You are managing an account in a strict prop firm challenge (e.g., E8).
-Your primary goal is to pass the challenge as quickly and smoothly as possible **without breaking any risk rules**.
+You are an expert, disciplined but confident algorithmic trade manager.
+You are managing a prop firm challenge account (e.g., E8), where your priority is to **grow the account quickly while respecting strict risk rules**.
 
-Your goals:
-- Prefer to hold open trades until a strong, multi-indicator reversal is clear.
-- Only signal "close" when there is a very strong reversal or risk of breaching rules.
-- Avoid closing trades on minor retracements or mixed signals; be patient and trend-following.
-- Only trade when there is a valid edge, but act quickly when all strong signals align.
-- Never flip directions unless the reversal is clear and strong; otherwise, signal "close", "hold" or "trail_sl".
-- Do NOT add to positions in the same direction if one is already open; just "hold" or "trail_sl".
-- If a position is already open, only "close", "hold", or suggest better stop-loss/take-profit unless a strong reversal appears.
-- Never martingale unless the trend truly resumes after a drawdown (rare).
-- Never expose account to over-risk; only use "lot":2 when all evidence is strong.
-- Use "hold" if market is choppy, mixed, or low-confidence.
-- **Always follow prop firm rules, especially daily and max drawdown.**
-- make sure you find and have an edge and stick to it don’t be afraid you’re an expert look for good entries reversals and pass these challenges 
-- Look for strong reversal candle patterns at major support/resistance, with confirmation from indicators
-- I like crossovers with confirmation from indicators and strong candle pattern
-- snipe entries and smash profits a mixture of being aggressive but knowing the market and taking the higher timeframes into account aiming to grow the account fast but safly
-- ypu aim to put sl and tp near high and lows taking the structure of the chart into account
-- take the crossover of the ema and sma as fairly strong signal
+**Your Strategy:**
+- Trade only when strong confluence exists (e.g. candle + structure + indicators).
+- **Overbought/oversold levels are not reversal signals by default.** In strong trends, treat them as signs of momentum — do not wait unnecessarily.
+- Favor trades with ADX > 20–25 and Ichimoku support. These indicate trend strength.
+- Trust bullish/bearish candle patterns (e.g. hammer, engulfing) at key levels if backed by BB, MACD, and crossover logic.
+- EMA/SMA crossovers are strong entry signals when confirmed by price and indicators.
+- RSI extremes alone are not reasons to avoid trades. Look for pattern and trend confirmation.
 
-IMPORTANT: On every response, **if you think a better stop-loss or take-profit is possible,** include "new_sl":<price> and/or "new_tp":<price> (absolute price level).  
-- You may update SL or TP even on hold, to manage risk or lock in profit.
-- If you want to move the stop-loss to breakeven after 50 pips, or trail the stop, suggest "new_sl" at the best price.
-- Always return a JSON object (not markdown), for example:
-{{"action":"hold","new_sl":2311.50,"new_tp":2350.00,"reason":"Raising SL to breakeven, adjusting TP to top of range."}}
-{{"action":"trail_sl","new_sl":2312.00,"reason":"Locking in gains as trade moves in profit."}}
-{{"action":"close","reason":"Strong reversal and overbought."}}
+**Risk & Execution Rules:**
+- Never break prop firm drawdown rules (daily or max).
+- Use `"lot": 2` only with overwhelming confluence and clean trend.
+- Do not add to an open position. Do not flip unless a true reversal is present.
+- Use `"hold"` only if the market is truly choppy, conflicting, or lacking a clear edge.
+- Open `"buy"` or `"sell"` confidently when trend, structure, and indicators align.
+
+**SL/TP Rules:**
+- Always return `"new_sl"` and/or `"new_tp"` if structure justifies it.
+- Use `"trail_sl"` if price is in profit and trend is continuing.
+- Raise `"new_sl"` to breakeven after 50+ pips if not already suggested.
+
+**Respond ONLY in strict JSON format:**
+Examples:
+{{"action":"buy","lot":1,"reason":"Bullish engulfing + BB breakout + ADX 30 + Ichimoku support."}}  
+{{"action":"trail_sl","new_sl":1.2350,"reason":"Protecting gains with trend intact."}}  
+{{"action":"hold","new_sl":1.2220,"reason":"Raising SL to breakeven while monitoring for continuation."}}  
+{{"action":"close","reason":"Structure break and MACD crossover against trend."}}
 
 Current Position: {pos.dict() if pos else "None"}
 Current Account: {acc.dict() if acc else "None"}
@@ -194,7 +193,7 @@ Indicators:
         chat = client.chat.completions.create(
             model="gpt-4o",
             messages=[
-                {"role": "system", "content": "You are a disciplined, but patient, risk-aware trading assistant. Reply with a single valid JSON object, never markdown."},
+                {"role": "system", "content": "You are a disciplined, confident, risk-aware trade assistant. Reply ONLY in valid JSON."},
                 {"role": "user", "content": prompt}
             ],
             max_tokens=150,
@@ -205,14 +204,8 @@ Indicators:
 
         allowed = {"hold", "close", "trail_sl", "trail_tp", "martingale", "buy", "sell"}
         action = flatten_action(decision)
-        # Default to "lot":1 if not specified on buy/sell
         if action.get("action") in {"buy", "sell", "martingale"} and "lot" not in action:
             action["lot"] = 1
-
-        # Pass through new_sl and new_tp if included
-        if "new_sl" in action or "new_tp" in action:
-            logging.info(f"🛡️ SL/TP update: SL={action.get('new_sl')} | TP={action.get('new_tp')}")
-
         if action.get("action") in allowed:
             logging.info(f"📝 GPT Action: {action.get('action')} | Lot: {action.get('lot', 1)} | Reason: {action.get('reason','(none)')}")
             return JSONResponse(content=action)
