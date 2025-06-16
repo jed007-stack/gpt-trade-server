@@ -44,6 +44,7 @@ class Indicators(BaseModel):
     support_resistance: Optional[Dict[str, List[float]]] = None
     fibonacci: Optional[Dict[str, Any]] = None
     candlestick_patterns: Optional[List[str]] = None
+    atr: Optional[float] = None   # <-- Optionally add ATR if you include it in payload later
 
 class Candle(BaseModel):
     open: float
@@ -73,6 +74,8 @@ class TradeData(BaseModel):
     current_price: Optional[float] = None
     news_override: Optional[bool] = False
     indicators: Indicators
+    h1_indicators: Optional[Indicators] = None
+    h4_indicators: Optional[Indicators] = None
     position: Optional[Position] = None
     account: Optional[Account] = None
     candles1: Optional[List[Candle]] = []
@@ -111,6 +114,8 @@ def flatten_action(decision):
 async def gpt_manage(wrapper: TradeWrapper):
     trade = wrapper.data
     ind = trade.indicators
+    h1 = trade.h1_indicators or Indicators(**{})
+    h4 = trade.h4_indicators or Indicators(**{})
     pos = trade.position
     acc = trade.account or Account(balance=10000, equity=10000, margin=None)
     candles = trade.candles1[-5:] if trade.candles1 else []
@@ -132,35 +137,42 @@ async def gpt_manage(wrapper: TradeWrapper):
 
     # === Enhanced Prompt ===
     prompt = f"""
-You are an expert, disciplined but confident algorithmic trade manager.
-You are managing a prop firm challenge account (e.g., E8), where your priority is to **grow the account quickly while respecting strict risk rules**.
+You are an elite, disciplined algorithmic trade manager for prop firm challenges.
+Your job is to maximize profit and account growth while **holding trades for the full potential of the trend**, unless there is a true structural break.
 
-**Your Strategy:**
-- Trade only when strong confluence exists (e.g. candle + structure + indicators).
-- **Overbought/oversold levels are not reversal signals by default.** In strong trends, treat them as signs of momentum — do not wait unnecessarily.
-- Favor trades with ADX > 20–25 and Ichimoku support. These indicate trend strength.
-- Trust bullish/bearish candle patterns (e.g. hammer, engulfing) at key levels if backed by BB, MACD, and crossover logic.
-- EMA/SMA crossovers are strong entry signals when confirmed by price and indicators.
-- RSI extremes alone are not reasons to avoid trades. Look for pattern and trend confirmation.
-- dont move sl to Break even too soon. note the charges are $7 for every 1 lot lets try and cover that when moving the stop.
+**Updated Strategy Rules for Optimal Trade Duration:**
+- **Hold trades for as long as higher timeframe (H1/H4) trend and structure remain in agreement with entry direction.**
+- Do **not** move stop loss to breakeven after minor moves, especially if higher TF trend is intact.
+- Only suggest moving stop loss up (to breakeven or profit) if BOTH local and higher timeframes show warning signs, OR if the trade is up more than +50 pips or 1.5x ATR.
+- Do **not** close trades for small profits if the higher timeframe is strong—**ride the trend!**
+- Suggest `"hold_duration"` (in candles or minutes) if you want to hold even longer.
+- Trail stop loss only after strong moves (e.g., +1 ATR or clear trend extension).
+- "Take partial profit" is **NOT ALLOWED**; hold full position unless structure truly breaks.
+
+**Classic Confluence Criteria:**
+- Trade only with confluence: candle + structure + multiple indicators.
+- In strong trends, treat overbought/oversold as momentum, not as a reversal by itself.
+- ADX > 20–25 and Ichimoku support = real trend; don't exit early.
+- Confirm with EMA/SMA crossover, MACD, and candlestick at key levels.
+- RSI extremes alone are **not** exit signals—look for structure and HTF trend shift.
+
 **Risk & Execution Rules:**
-- Never break prop firm drawdown rules (daily or max).
-- Use `"lot": 2` only with overwhelming confluence and clean trend.
-- Do not add to an open position. Do not flip unless a true reversal is present.
-- Use `"hold"` only if the market is truly choppy, conflicting, or lacking a clear edge.
-- Open `"buy"` or `"sell"` confidently when trend, structure, and indicators align.
+- Never break drawdown rules (daily or max).
+- `"lot": 2` only with overwhelming confluence and strong trend on all timeframes.
+- No adding to open positions. No flipping unless true reversal confirmed on multiple timeframes.
+- `"hold"` only if there is no clear edge or confluence.
+- `"buy"` or `"sell"` when everything aligns—**hold as long as possible**.
 
-**SL/TP Rules:**
-- Always return `"new_sl"` and/or `"new_tp"` if structure justifies it.
-- Use `"trail_sl"` if price is in profit and trend is continuing.
-- Raise `"new_sl"` to breakeven after 50+ pips if not already suggested.
+**SL/TP Management:**
+- Only return `"new_sl"` or `"trail_sl"` if structure or higher timeframe confirms.
+- `"new_sl"` to breakeven after +50 pips **and** higher TF agrees or trade is at least +1 ATR in profit.
+- `"hold_duration"` is encouraged in strong trends.
 
-**Respond ONLY in strict JSON format:**
+**ALWAYS reply in strict JSON:**
 Examples:
-{{"action":"buy","lot":1,"reason":"Bullish engulfing + BB breakout + ADX 30 + Ichimoku support."}}  
-{{"action":"trail_sl","new_sl":1.2350,"reason":"Protecting gains with trend intact."}}  
-{{"action":"hold","new_sl":1.2220,"reason":"Raising SL to breakeven while monitoring for continuation."}}  
-{{"action":"close","reason":"Structure break and MACD crossover against trend."}}
+{{"action":"hold","hold_duration":12,"reason":"Higher timeframe trend still bullish, holding for more extension."}}
+{{"action":"trail_sl","new_sl":1.2350,"reason":"Up +80p and H1/H4 structure still supports uptrend—trail below last swing low."}}
+{{"action":"close","reason":"H1 structure break, MACD crosses against, exiting."}}
 
 Current Position: {pos.dict() if pos else "None"}
 Current Account: {acc.dict() if acc else "None"}
@@ -171,21 +183,9 @@ Symbol: {trade.symbol}
 Timeframe: {trade.timeframe}
 Open Price: {trade.open_price}
 Current Price: {trade.current_price}
-Indicators: 
-  BB: {ind.bb_upper}/{ind.bb_middle}/{ind.bb_lower}
-  Stoch K/D/J: {ind.stoch_k}/{ind.stoch_d}/{getattr(ind, 'stoch_j', None)}
-  MACD: {ind.macd.main}/{ind.macd.signal}
-  SMA100: {ind.sma100}
-  EMA40: {ind.ema40}
-  ADX: {getattr(ind, 'adx', None)}
-  MFI: {getattr(ind, 'mfi', None)}
-  Williams %R: {getattr(ind, 'williams_r', None)}
-  Ichimoku: {ind.ichimoku.dict() if ind.ichimoku else None}
-  RSI Array: {ind.rsi_array}
-  Price Array: {ind.price_array}
-  Support/Resistance: {ind.support_resistance}
-  Fibonacci: {ind.fibonacci}
-  Candlestick Patterns: {ind.candlestick_patterns}
+M5 Indicators: {ind.dict()}
+H1 Indicators: {h1.dict() if h1 else None}
+H4 Indicators: {h4.dict() if h4 else None}
 """
 
     try:
@@ -193,11 +193,11 @@ Indicators:
         chat = client.chat.completions.create(
             model="gpt-4o",
             messages=[
-                {"role": "system", "content": "You are a disciplined, confident, risk-aware trade assistant. Reply ONLY in valid JSON."},
+                {"role": "system", "content": "You are an elite, disciplined, risk-aware trade assistant. Reply ONLY in valid JSON."},
                 {"role": "user", "content": prompt}
             ],
-            max_tokens=150,
-            temperature=0.22
+            max_tokens=200,
+            temperature=0.18
         )
         decision = chat.choices[0].message.content.strip()
         logging.info(f"🎯 GPT Decision (raw): {decision}")
@@ -206,7 +206,7 @@ Indicators:
         action = flatten_action(decision)
         if action.get("action") in {"buy", "sell", "martingale"} and "lot" not in action:
             action["lot"] = 1
-        if action.get("action") in allowed:
+        if action.get("action") in allowed or action.get("action") == "hold":
             logging.info(f"📝 GPT Action: {action.get('action')} | Lot: {action.get('lot', 1)} | Reason: {action.get('reason','(none)')}")
             return JSONResponse(content=action)
         else:
