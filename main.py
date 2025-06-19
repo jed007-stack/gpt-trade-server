@@ -87,7 +87,6 @@ class TradeData(BaseModel):
 class TradeWrapper(BaseModel):
     data: TradeData
 
-# === Helper: Flatten GPT response ===
 def flatten_action(decision):
     if isinstance(decision, dict) and "action" in decision:
         return decision
@@ -109,7 +108,6 @@ def flatten_action(decision):
             pass
     return {"action": "hold", "reason": "Could not decode action."}
 
-# === GPT Manager ===
 @app.post("/gpt/manage")
 async def gpt_manage(wrapper: TradeWrapper):
     trade = wrapper.data
@@ -135,7 +133,6 @@ async def gpt_manage(wrapper: TradeWrapper):
         logging.warning("🛑 News conflict detected. GPT override active.")
         return JSONResponse(content={"action": "hold", "reason": "News conflict — override active"})
 
-    # === Enhanced "Sniper" Prompt ===
     prompt = f"""
 You are a sniper-like algorithmic trading assistant for prop firm challenges.
 Your core values: Quality over quantity. Only enter or exit when there is true, strong confluence.  
@@ -144,29 +141,24 @@ Be active and responsive, but never force trades unless all signals are lined up
 **Entry Rules (Sniper Mode):**
 - Only trade if the primary MA/EMA cross aligns with **at least 2 additional indicators** (MACD, ADX, Ichimoku, Stoch, RSI, etc).
 - If MA/EMA cross is ambiguous or not present, require **at least 4 indicators** in agreement before any trade.
-- If all major signals (MA, MACD, ADX, Ichimoku, candlestick structure, and support/resistance) are in *perfect* alignment, take the trade with double the usual lot ("lot": 2).
+- If all major signals (MA, MACD, ADX, Ichimoku, candlestick structure, and support/resistance) are in perfect alignment, take the trade with double the usual lot ("lot": 2).
 - If you don't see a high-probability edge, reply "hold" and wait.
 
 **Exit Rules (High Standard):**
 - Exit only if: 
-  - There is a clear structure break **and** at least 2 indicators warn.
+  - There is a clear structure break and at least 2 indicators warn.
   - A true higher timeframe (HTF) trend reversal or multi-indicator flip occurs.
   - You have already taken a partial profit (after a strong move away from entry) and technicals signal loss of edge.
 - Do NOT close for minor profit if quality confluence remains—**always ride strong trends until the real structure breaks**.
-- Move stop loss (or trail) only after a significant move **and** confirmed by structure/HTF, never pre-emptively.
+- Move stop loss (or trail) only after a significant move and confirmed by structure/HTF, never pre-emptively.
 - Partial profit is allowed, but only after strong move and if structure or indicator warning appears.
-- If a position is already open, only "close", "hold", "trail_sl", or suggest better stop-loss/take-profit unless a strong reversal appears.**General Style:**
-- Hold as long as confluence remains.
-- If no clear trade, always "hold".
-- Never overtrade. Never close early for small wins.
-- Be picky with both entries and exits—**quality over everything**.
+- If a position is already open, only "close", "hold", "trail_sl", or suggest better stop-loss/take-profit unless a strong reversal appears.
 - Do NOT add to positions in the same direction if one is already open; just "hold" or "trail_sl".
 
-IMPORTANT: On every response, **if you think a better stop-loss or take-profit is possible,** include "new_sl":<price> and/or "new_tp":<price> (absolute price level).  
+**SL/TP Management:**
+- On every response, if a better stop-loss or take-profit is possible, include "new_sl":<price> and/or "new_tp":<price> (absolute price level).
 - You may update SL or TP even on hold, to manage risk or lock in profit.
-- Consider account size, symbol volatility, and price structure.
 - If you want to move the stop-loss to breakeven after 50 pips, or trail the stop, suggest "new_sl" at the best price.
-
 
 Always reply in strict JSON.
 Example: {{"action":"buy","reason":"All confluence: MA, MACD, ADX, Ichimoku up. Entering with confidence."}}
