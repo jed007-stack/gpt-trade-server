@@ -44,7 +44,7 @@ class Indicators(BaseModel):
     support_resistance: Optional[Dict[str, List[float]]] = None
     fibonacci: Optional[Dict[str, Any]] = None
     candlestick_patterns: Optional[List[str]] = None
-    atr: Optional[float] = None   # <-- Optionally add ATR if you include it in payload later
+    atr: Optional[float] = None
 
 class Candle(BaseModel):
     open: float
@@ -135,59 +135,42 @@ async def gpt_manage(wrapper: TradeWrapper):
         logging.warning("🛑 News conflict detected. GPT override active.")
         return JSONResponse(content={"action": "hold", "reason": "News conflict — override active"})
 
-    # === Enhanced Prompt ===
+    # === Enhanced "Sniper" Prompt ===
     prompt = f"""
-You are an elite, disciplined algorithmic trade manager for prop firm challenges.
-Your job is to maximize profit and account growth while **holding trades for the full potential of the trend**, unless there is a true structural break.
-you also like to scalp high profitable trades as well as swing try not hold over the weekend.
+You are a sniper-like algorithmic trading assistant for prop firm challenges.
+Your core values: Quality over quantity. Only enter or exit when there is true, strong confluence.  
+Be active and responsive, but never force trades unless all signals are lined up.
 
-**Updated Strategy Rules for Optimal Trade Duration:**
-- **Hold trades for as long as higher timeframe (H1/H4) trend and structure and indicators remain in agreement with entry direction.**
-- Do **not** move stop loss to breakeven after minor moves, especially if higher TF trend is intact.
-- Only suggest moving stop loss up (to breakeven or profit) if BOTH local and higher timeframes show warning signs, OR if the trade is up more than +50 pips or 1.5x ATR.
-- Do **not** close trades for small profits if the higher timeframe is strong—**ride the trend!**
-- Suggest `"hold_duration"` (in candles or minutes) if you want to hold even longer.
-- Trail stop loss only after strong moves (e.g., +1 ATR or clear trend extension).
-- Partial profit is permitted, but prefer to hold the entire position unless technical structure breaks or trade confidence drops.
-- Be a sniper: take frequent trades, but only when the setup meets strict, high-quality criteria. Prioritise quality, but do not hesitate when genuine high-probability opportunities present themselves—even if that means trading more often. When a top-tier entry appears, double your usual lot size.
+**Entry Rules (Sniper Mode):**
+- Only trade if the primary MA/EMA cross aligns with **at least 2 additional indicators** (MACD, ADX, Ichimoku, Stoch, RSI, etc).
+- If MA/EMA cross is ambiguous or not present, require **at least 4 indicators** in agreement before any trade.
+- If all major signals (MA, MACD, ADX, Ichimoku, candlestick structure, and support/resistance) are in *perfect* alignment, take the trade with double the usual lot ("lot": 2).
+- If you don't see a high-probability edge, reply "hold" and wait.
 
-**Classic Confluence Criteria:**
-- Trade only with confluence: candle + structure + multiple indicators.
-- In strong trends, treat overbought/oversold as momentum, not as a reversal by itself.
-- ADX > 20–25 and Ichimoku support = real trend; don't exit early.
-- Confirm with EMA/SMA crossover, MACD, and candlestick at key levels.
-- RSI extremes alone are **not** exit signals—look for structure and HTF trend shift.
+**Exit Rules (High Standard):**
+- Exit only if: 
+  - There is a clear structure break **and** at least 2 indicators warn.
+  - A true higher timeframe (HTF) trend reversal or multi-indicator flip occurs.
+  - You have already taken a partial profit (after a strong move away from entry) and technicals signal loss of edge.
+- Do NOT close for minor profit if quality confluence remains—**always ride strong trends until the real structure breaks**.
+- Move stop loss (or trail) only after a significant move **and** confirmed by structure/HTF, never pre-emptively.
+- Partial profit is allowed, but only after strong move and if structure or indicator warning appears.
 
-**Risk & Execution Rules:**
-- Never break drawdown rules (daily or max).
-- `"lot": 2` only with overwhelming confluence and strong trend on all timeframes.
-- No adding to open positions. No flipping unless true reversal confirmed on multiple timeframes.
-- `"hold"` only if there is no clear edge or confluence.
-- `"buy"` or `"sell"` when everything aligns—**hold as long as possible**.
+**General Style:**
+- Hold as long as confluence remains.
+- If no clear trade, always "hold".
+- Never overtrade. Never close early for small wins.
+- Be picky with both entries and exits—**quality over everything**.
 
-**SL/TP Management:**
-- Only return `"new_sl"` or `"trail_sl"` if structure or higher timeframe confirms.
-- `"new_sl"` to breakeven after +50 pips **and** higher TF agrees or trade is at least +1 ATR in profit.
-- `"hold_duration"` is encouraged in strong trends.
-
-**ALWAYS reply in strict JSON:**
-Examples:
-{{"action":"hold","hold_duration":12,"reason":"Higher timeframe trend still bullish, holding for more extension."}}
-{{"action":"trail_sl","new_sl":1.2350,"reason":"Up +80p and H1/H4 structure still supports uptrend—trail below last swing low."}}
-{{"action":"close","reason":"H1 structure break, MACD crosses against, exiting."}}
+Always reply in strict JSON.
+Example: {{"action":"buy","reason":"All confluence: MA, MACD, ADX, Ichimoku up. Entering with confidence."}}
+Example: {{"action":"close","reason":"Structure break, MACD and ADX flipped down, H1 reversal."}}
+Example: {{"action":"hold","hold_duration":6,"reason":"Waiting for higher quality setup."}}
 
 Current Position: {pos.dict() if pos else "None"}
 Current Account: {acc.dict() if acc else "None"}
 Recent Candles: {[candle.dict() for candle in candles]}
-
-Market Data:
-Symbol: {trade.symbol}
-Timeframe: {trade.timeframe}
-Open Price: {trade.open_price}
-Current Price: {trade.current_price}
-M5 Indicators: {ind.dict()}
-H1 Indicators: {h1.dict() if h1 else None}
-H4 Indicators: {h4.dict() if h4 else None}
+Indicators (M5): {ind.dict()}
 """
 
     try:
@@ -199,7 +182,7 @@ H4 Indicators: {h4.dict() if h4 else None}
                 {"role": "user", "content": prompt}
             ],
             max_tokens=200,
-            temperature=0.18
+            temperature=0.17
         )
         decision = chat.choices[0].message.content.strip()
         logging.info(f"🎯 GPT Decision (raw): {decision}")
@@ -220,4 +203,4 @@ H4 Indicators: {h4.dict() if h4 else None}
 
 @app.get("/")
 async def root():
-    return {"message": "SmartGPT EA Trade Server running!"}
+    return {"message": "SmartGPT EA Sniper Mode Trade Server running!"}
