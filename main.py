@@ -33,8 +33,10 @@ class Indicators(BaseModel):
     stoch_d: float
     stoch_j: Optional[float]
     macd: MACD
-    sma100: Optional[float]
-    ema40: Optional[float]
+    sma: Optional[float] = None
+    ema: Optional[float] = None
+    sma_period: Optional[int] = None
+    ema_period: Optional[int] = None
     adx: Optional[float]
     mfi: Optional[float]
     williams_r: Optional[float]
@@ -118,12 +120,16 @@ async def gpt_manage(wrapper: TradeWrapper):
     acc = trade.account or Account(balance=10000, equity=10000, margin=None)
     candles = trade.candles1[-5:] if trade.candles1 else []
 
+    # Use the actual periods from the EA
+    sma_period = getattr(ind, "sma_period", "unknown")
+    ema_period = getattr(ind, "ema_period", "unknown")
+
     logging.info(f"✅ {trade.symbol} | Dir: {trade.direction} | {trade.open_price} → {trade.current_price}")
     logging.info(
         f"📊 BB: ({ind.bb_upper}, {ind.bb_middle}, {ind.bb_lower}) | "
         f"Stoch: K={ind.stoch_k}, D={ind.stoch_d}, J={getattr(ind, 'stoch_j', None)} | "
         f"MACD: {ind.macd.main}/{ind.macd.signal} | "
-        f"SMA100: {ind.sma100}, EMA40: {ind.ema40} | "
+        f"SMA({sma_period}): {ind.sma}, EMA({ema_period}): {ind.ema} | "
         f"ADX: {getattr(ind, 'adx', None)} | "
         f"MFI: {getattr(ind, 'mfi', None)} | Williams %R: {getattr(ind, 'williams_r', None)} | "
         f"Ichimoku: {ind.ichimoku.dict() if ind.ichimoku else None}"
@@ -135,7 +141,7 @@ async def gpt_manage(wrapper: TradeWrapper):
 
     prompt = f"""
 You are a sniper-like algorithmic trading assistant for prop firm challenges.
-Your core values: Quality over quantity. Only enter or exit when there is true, strong confluence.  
+Your core values: Quality over quantity. Only enter or exit when there is true, strong confluence.
 Be active and responsive, but never force trades unless all signals are lined up.
 
 **Entry Rules (Sniper Mode):**
@@ -145,7 +151,7 @@ Be active and responsive, but never force trades unless all signals are lined up
 - If you don't see a high-probability edge, reply "hold" and wait.
 
 **Exit Rules (High Standard):**
-- Exit only if: 
+- Exit only if:
   - There is a clear structure break and at least 2 indicators warn.
   - A true higher timeframe (HTF) trend reversal or multi-indicator flip occurs.
   - You have already taken a partial profit (after a strong move away from entry) and technicals signal loss of edge.
