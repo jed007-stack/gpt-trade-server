@@ -18,57 +18,57 @@ logging.basicConfig(level=logging.INFO)
 # === Data Models ===
 
 class MACD(BaseModel):
-    main: float
-    signal: float
+    main: Optional[float] = None
+    signal: Optional[float] = None
 
 class Ichimoku(BaseModel):
-    tenkan: float
-    kijun: float
-    senkou_a: float
-    senkou_b: float
+    tenkan: Optional[float] = None
+    kijun: Optional[float] = None
+    senkou_a: Optional[float] = None
+    senkou_b: Optional[float] = None
 
 class Indicators(BaseModel):
-    bb_upper: float
-    bb_middle: float
-    bb_lower: float
-    stoch_k: float
-    stoch_d: float
-    stoch_j: Optional[float]
-    macd: MACD
+    bb_upper: Optional[float] = None
+    bb_middle: Optional[float] = None
+    bb_lower: Optional[float] = None
+    stoch_k: Optional[float] = None
+    stoch_d: Optional[float] = None
+    stoch_j: Optional[float] = None
+    macd: Optional[MACD] = None
     sma: Optional[float] = None
     ema: Optional[float] = None
     sma_period: Optional[int] = None
     ema_period: Optional[int] = None
-    adx: Optional[float]
-    mfi: Optional[float]
-    williams_r: Optional[float]
-    ichimoku: Optional[Ichimoku]
-    rsi_array: Optional[List[float]]
-    price_array: Optional[List[float]]
+    adx: Optional[float] = None
+    mfi: Optional[float] = None
+    williams_r: Optional[float] = None
+    ichimoku: Optional[Ichimoku] = None
+    rsi_array: Optional[List[float]] = None
+    price_array: Optional[List[float]] = None
     support_resistance: Optional[Dict[str, List[float]]] = None
     fibonacci: Optional[Dict[str, Any]] = None
     candlestick_patterns: Optional[List[str]] = None
     atr: Optional[float] = None
 
 class Candle(BaseModel):
-    open: float
-    high: float
-    low: float
-    close: float
-    volume: float
+    open: Optional[float] = None
+    high: Optional[float] = None
+    low: Optional[float] = None
+    close: Optional[float] = None
+    volume: Optional[float] = None
 
 class Position(BaseModel):
-    direction: Optional[str]
-    open_price: Optional[float]
-    sl: Optional[float]
-    tp: Optional[float]
-    lot: Optional[float]
-    pnl: Optional[float]
+    direction: Optional[str] = None
+    open_price: Optional[float] = None
+    sl: Optional[float] = None
+    tp: Optional[float] = None
+    lot: Optional[float] = None
+    pnl: Optional[float] = None
 
 class Account(BaseModel):
-    balance: float
-    equity: float
-    margin: Optional[float]
+    balance: Optional[float] = None
+    equity: Optional[float] = None
+    margin: Optional[float] = None
 
 class TradeData(BaseModel):
     symbol: str
@@ -77,14 +77,14 @@ class TradeData(BaseModel):
     open_price: Optional[float] = None
     current_price: Optional[float] = None
     news_override: Optional[bool] = False
-    indicators: Indicators  # 1m
-    h1_indicators: Optional[Indicators] = None  # Not used
-    h4_indicators: Optional[Indicators] = None  # Not used
+    indicators: Optional[Indicators] = None  # 1m
+    h1_indicators: Optional[Indicators] = None  # 5m
+    h4_indicators: Optional[Indicators] = None  # 15m
     position: Optional[Position] = None
     account: Optional[Account] = None
-    candles1: Optional[List[Candle]] = []  # 1m
-    candles2: Optional[List[Candle]] = []  # 5m
-    candles3: Optional[List[Candle]] = []  # 15m
+    candles1: Optional[List[Candle]] = []
+    candles2: Optional[List[Candle]] = []
+    candles3: Optional[List[Candle]] = []
     live_candle1: Optional[Candle] = None
     live_candle2: Optional[Candle] = None
 
@@ -127,9 +127,9 @@ def in_london_ny_session(utc_dt=None):
 @app.post("/gpt/manage")
 async def gpt_manage(wrapper: TradeWrapper):
     trade = wrapper.data
-    ind_1m = trade.indicators
-    ind_5m = Indicators(**{}) if not trade.candles2 else trade.h1_indicators or Indicators(**{})
-    ind_15m = Indicators(**{}) if not trade.candles3 else trade.h4_indicators or Indicators(**{})
+    ind_1m = trade.indicators or Indicators()
+    ind_5m = trade.h1_indicators or Indicators()
+    ind_15m = trade.h4_indicators or Indicators()
     pos = trade.position
     acc = trade.account or Account(balance=10000, equity=10000, margin=None)
     candles_1m = trade.candles1[-5:] if trade.candles1 else []
