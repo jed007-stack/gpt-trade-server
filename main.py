@@ -15,7 +15,7 @@ openai.api_key = os.getenv("OPENAI_API_KEY")
 app = FastAPI()
 logging.basicConfig(level=logging.INFO)
 
-# === Data Models ===
+# === Data Models (Match EA Payload) ===
 
 class MACD(BaseModel):
     main: Optional[float] = None
@@ -73,18 +73,16 @@ class Account(BaseModel):
 class TradeData(BaseModel):
     symbol: str
     timeframe: str
-    direction: Optional[str] = None
-    open_price: Optional[float] = None
-    current_price: Optional[float] = None
-    news_override: Optional[bool] = False
-    indicators: Optional[Indicators] = None  # 1m
-    h1_indicators: Optional[Indicators] = None  # 5m
-    h4_indicators: Optional[Indicators] = None  # 15m
+    update_type: Optional[str] = None
+    indicators: Optional[Indicators] = None       # 1m
+    h1_indicators: Optional[Indicators] = None    # 5m
+    h4_indicators: Optional[Indicators] = None    # 15m
     position: Optional[Position] = None
     account: Optional[Account] = None
     candles1: Optional[List[Candle]] = []
     candles2: Optional[List[Candle]] = []
     candles3: Optional[List[Candle]] = []
+    news_override: Optional[bool] = False
     live_candle1: Optional[Candle] = None
     live_candle2: Optional[Candle] = None
 
@@ -136,7 +134,10 @@ async def gpt_manage(wrapper: TradeWrapper):
     candles_5m = trade.candles2[-5:] if trade.candles2 else []
     candles_15m = trade.candles3[-5:] if trade.candles3 else []
 
-    # === SESSION FILTER ===
+    # LOG incoming payload
+    logging.info(f"🔻 RAW PAYLOAD:\n{wrapper.json()}\n---")
+
+    # SESSION FILTER
     if not in_london_ny_session():
         logging.info("⏳ Out of London/NY session, no new trades.")
         return JSONResponse(content={"action": "hold", "reason": "Outside London/New York session", "confidence": 0})
@@ -145,10 +146,17 @@ async def gpt_manage(wrapper: TradeWrapper):
         logging.warning("🛑 News conflict detected. GPT override active.")
         return JSONResponse(content={"action": "hold", "reason": "News conflict — override active", "confidence": 0})
 
-    # === LOGGING ===
-    logging.info(f"✅ {trade.symbol} | 1m: {trade.direction} | {trade.open_price} → {trade.current_price}")
+    # LOGGING SUMMARY
+    logging.info(f"✅ {trade.symbol} | 1m Dir: {getattr(pos, 'direction', None)} | {getattr(pos, 'open_price', None)} → {getattr(pos, 'pnl', None)}")
+    logging.info(
+        f"📊 1m BB: ({ind_1m.bb_upper}, {ind_1m.bb_middle}, {ind_1m.bb_lower}) | "
+        f"Stoch: K={ind_1m.stoch_k}, D={ind_1m.stoch_d}, J={ind_1m.stoch_j} | "
+        f"MACD: {getattr(ind_1m.macd, 'main', None)}/{getattr(ind_1m.macd, 'signal', None)} | "
+        f"SMA: {ind_1m.sma} EMA: {ind_1m.ema} | "
+        f"ADX: {ind_1m.adx} | MFI: {ind_1m.mfi} | WillR: {ind_1m.williams_r}"
+    )
 
-    # === GPT PROMPT ===
+    # GPT PROMPT
     prompt = f"""
 You are a sniper, scalping-focused trading assistant for prop firm challenges.
 
