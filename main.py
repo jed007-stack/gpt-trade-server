@@ -35,10 +35,12 @@ class Indicators(BaseModel):
     stoch_d: Optional[float] = None
     stoch_j: Optional[float] = None
     macd: Optional[MACD] = None
-    sma: Optional[float] = None
     ema: Optional[float] = None
-    sma_period: Optional[int] = None
     ema_period: Optional[int] = None
+    lwma: Optional[float] = None
+    lwma_period: Optional[int] = None
+    smma: Optional[float] = None
+    smma_period: Optional[int] = None
     adx: Optional[float] = None
     mfi: Optional[float] = None
     williams_r: Optional[float] = None
@@ -74,6 +76,8 @@ class TradeData(BaseModel):
     symbol: str
     timeframe: str
     update_type: Optional[str] = None
+    cross_signal: Optional[str] = None
+    cross_meaning: Optional[str] = None
     indicators: Optional[Indicators] = None       # 1m
     h1_indicators: Optional[Indicators] = None    # 5m
     h4_indicators: Optional[Indicators] = None    # 15m
@@ -133,6 +137,8 @@ async def gpt_manage(wrapper: TradeWrapper):
     candles_1m = trade.candles1[-5:] if trade.candles1 else []
     candles_5m = trade.candles2[-5:] if trade.candles2 else []
     candles_15m = trade.candles3[-5:] if trade.candles3 else []
+    cross_signal = trade.cross_signal or "none"
+    cross_meaning = trade.cross_meaning or "none"
 
     # LOG incoming payload
     logging.info(f"🔻 RAW PAYLOAD:\n{wrapper.json()}\n---")
@@ -146,13 +152,13 @@ async def gpt_manage(wrapper: TradeWrapper):
         logging.warning("🛑 News conflict detected. GPT override active.")
         return JSONResponse(content={"action": "hold", "reason": "News conflict — override active", "confidence": 0})
 
-    # LOGGING SUMMARY
+    # LOGGING SUMMARY (now with EMA/LWMA/SMMA, no SMA)
     logging.info(f"✅ {trade.symbol} | 1m Dir: {getattr(pos, 'direction', None)} | {getattr(pos, 'open_price', None)} → {getattr(pos, 'pnl', None)}")
     logging.info(
         f"📊 1m BB: ({ind_1m.bb_upper}, {ind_1m.bb_middle}, {ind_1m.bb_lower}) | "
         f"Stoch: K={ind_1m.stoch_k}, D={ind_1m.stoch_d}, J={ind_1m.stoch_j} | "
         f"MACD: {getattr(ind_1m.macd, 'main', None)}/{getattr(ind_1m.macd, 'signal', None)} | "
-        f"SMA: {ind_1m.sma} EMA: {ind_1m.ema} | "
+        f"EMA: {ind_1m.ema} LWMA: {ind_1m.lwma} SMMA: {ind_1m.smma} | "
         f"ADX: {ind_1m.adx} | MFI: {ind_1m.mfi} | WillR: {ind_1m.williams_r}"
     )
 
@@ -162,8 +168,13 @@ You are a sniper, scalping-focused trading assistant for prop firm challenges.
 
 **Time/Session filter:** Trade ONLY during London or New York session, never overnight or on weekends.
 
+**Crossover signals:**  
+- The latest cross_signal from the EA is: {cross_signal}  
+- The latest cross_meaning from the EA is: {cross_meaning}  
+- Use this as the primary directional bias (example: if buy_cross, only look for buy setups; if sell_cross, only look for sells).
+
 **Entry rules:**  
-- Only consider a trade if 1m EMA/SMA cross matches the trend of at least one higher timeframe (5m or 15m).  
+- Only consider a trade if 1m EMA/LWMA cross matches the trend of at least one higher timeframe (5m or 15m).  
 - Require confluence: At least 3 of these confirm for entry:  
   - MACD
   - RSI or Stochastic
@@ -175,7 +186,7 @@ You are a sniper, scalping-focused trading assistant for prop firm challenges.
 - Skip all ambiguous, low-confidence, or non-session signals.
 
 **Exit/scalp rules:**  
-- Prefer fast trailing stop as soon as >1xSL in profit.
+- Use an aggressive trailing stop as soon as trade is 0.5xSL in profit; move SL to breakeven and trail by 0.5xSL. If more profit, trail tighter.  
 - Exit fully if at least 2 indicators warn of a reversal, or structure breaks.
 - Always provide "new_sl" if trailing, and "new_tp" if next S/R is close.
 
@@ -192,7 +203,7 @@ You are a sniper, scalping-focused trading assistant for prop firm challenges.
 Example JSON reply:
 {{
   "action": "buy",
-  "reason": "1m EMA cross up, 5m uptrend, MACD and ADX > 20, BB breakout. All M1/M5 align.",
+  "reason": "1m EMA over LWMA, 5m uptrend, MACD and ADX > 20, BB breakout. Aggressive trailing stop set.",
   "confidence": 9,
   "lot": 2,
   "new_sl": 2301.5,
@@ -204,6 +215,8 @@ Example JSON reply:
   "confidence": 3
 }}
 
+Current Cross Signal: {cross_signal}
+Current Cross Meaning: {cross_meaning}
 Current Position: {pos.dict() if pos else "None"}
 Current Account: {acc.dict() if acc else "None"}
 Recent 1m Candles: {[candle.dict() for candle in candles_1m]}
@@ -256,4 +269,4 @@ Indicators (15m): {ind_15m.dict()}
 
 @app.get("/")
 async def root():
-    return {"message": "SmartGPT EA SCALPER - London/NY session, 1m/5m/15m confluence, edge only"}
+    return {"message": "SmartGPT EA SCALPER - London/NY session, EMA/LWMA/SMMA confluence, aggressive trailing stop"}
