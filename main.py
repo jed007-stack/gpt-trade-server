@@ -162,8 +162,7 @@ async def gpt_manage(wrapper: TradeWrapper):
         f"ADX: {ind_1m.adx} | MFI: {ind_1m.mfi} | WillR: {ind_1m.williams_r}"
     )
 
-    # --- MODIFIED PROMPT: Aggressive SL, Trailing, and Partial Profits ---
-    prompt = f"""
+  prompt = f"""
 You are a sniper, scalping-focused trading assistant for prop firm challenges.
 
 **Time/Session filter:** Trade ONLY during London or New York session, never overnight or on weekends but its ok to take profit of trades. 
@@ -185,12 +184,12 @@ You are a sniper, scalping-focused trading assistant for prop firm challenges.
 - If ALL indicators align on 1m and 5m or 15m, upsize to "lot":2 (otherwise lot 1).
 - Skip all ambiguous, low-confidence, or non-session signals.
 
-**Exit/scalp rules:**
-- Only move SL to entry after the trade is in profit by at least 0.2xSL or 10–15 pips (whichever is greater). This allows for natural pullbacks.
-- Once 0.3xSL is reached, activate trailing stop 0.15xSL behind price.
-- Tighten trailing to 0.1xSL once 0.5xSL is reached to lock in profit as the move extends.
-- Take partial profits (close 30–50% or reduce lot size) **only after the trade is 25+ pips or 0.3xSL in profit** (not just a small move).
-- If profit grows further (0.5xSL or 40+ pips), take another partial (close an additional 30%).
+**Exit/scalp rules (use fixed pips, not fractions of SL):**
+- Only move SL to entry (breakeven) after the trade is in profit by at least **15 pips**. This allows for natural pullbacks.
+- Once trade is **20 pips in profit**, activate trailing stop at **15 pips behind price**.
+- If profit reaches **40 pips**, tighten trailing stop to **10 pips behind price** to lock in more profit.
+- Take partial profits (close 30–50% or reduce lot size) **only after the trade is 25+ pips in profit**.
+- If profit grows further (**40+ pips**), take another partial (close an additional 30%).
 - If at least 2 indicators signal a reversal or structure breaks, exit the rest.
 - Always include "new_sl" for trailing and "partial_close" if taking a partial.
 - Never move SL tighter than the last swing low/high unless a reversal is detected.
@@ -230,6 +229,7 @@ Indicators (1m): {ind_1m.dict()}
 Indicators (5m): {ind_5m.dict()}
 Indicators (15m): {ind_15m.dict()}
 """
+
 
     try:
         client = openai.OpenAI()
