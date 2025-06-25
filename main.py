@@ -152,7 +152,7 @@ async def gpt_manage(wrapper: TradeWrapper):
         logging.warning("🛑 News conflict detected. GPT override active.")
         return JSONResponse(content={"action": "hold", "reason": "News conflict — override active", "confidence": 0})
 
-    # LOGGING SUMMARY (now with EMA/LWMA/SMMA, no SMA)
+    # LOGGING SUMMARY
     logging.info(f"✅ {trade.symbol} | 1m Dir: {getattr(pos, 'direction', None)} | {getattr(pos, 'open_price', None)} → {getattr(pos, 'pnl', None)}")
     logging.info(
         f"📊 1m BB: ({ind_1m.bb_upper}, {ind_1m.bb_middle}, {ind_1m.bb_lower}) | "
@@ -162,7 +162,7 @@ async def gpt_manage(wrapper: TradeWrapper):
         f"ADX: {ind_1m.adx} | MFI: {ind_1m.mfi} | WillR: {ind_1m.williams_r}"
     )
 
-    # GPT PROMPT
+    # --- MODIFIED PROMPT: Aggressive SL, Trailing, and Partial Profits ---
     prompt = f"""
 You are a sniper, scalping-focused trading assistant for prop firm challenges.
 
@@ -186,10 +186,14 @@ You are a sniper, scalping-focused trading assistant for prop firm challenges.
 - Skip all ambiguous, low-confidence, or non-session signals.
 
 **Exit/scalp rules:**  
-- Use an aggressive trailing stop as soon as trade is 0.2xSL in profit; move SL to breakeven and trail by 0.2xSL. If more profit, trail tighter.  
-- Exit fully if at least 2 indicators warn of a reversal, or structure breaks.
-- Always provide "new_sl" if trailing, and "new_tp" if next S/R is close.
-- take partial profits when in profit by 20 pips 
+- As soon as the trade is 0.1xSL in profit, move SL to entry.  
+- Once 0.2xSL is reached, activate trailing stop 0.1xSL behind price.  
+- Tighten to 0.05xSL once 0.5xSL is reached to lock in profit.  
+- Take **partial profits** (close 50% or reduce lot) when the trade is 20+ pips in profit (return "partial_close": 0.5 in your JSON).  
+- Exit fully if at least 2 indicators signal a reversal or market structure breaks.  
+- Always include "new_sl" for trailing, and "new_tp" for adjusting take profit.  
+- If taking partials, include "partial_close" in your JSON response.
+
 **SL/TP:**  
 - SL: Just beyond nearest 1m or 5m swing high/low (or min 1xATR)
 - TP: At least 2xSL or next major S/R.
@@ -203,11 +207,12 @@ You are a sniper, scalping-focused trading assistant for prop firm challenges.
 Example JSON reply:
 {{
   "action": "buy",
-  "reason": "1m EMA over LWMA, 5m uptrend, MACD and ADX > 20, BB breakout. Aggressive trailing stop set.",
+  "reason": "1m EMA over LWMA, 5m uptrend, MACD and ADX > 20, BB breakout. Aggressive trailing stop set, partial close triggered.",
   "confidence": 9,
   "lot": 2,
   "new_sl": 2301.5,
-  "new_tp": 2310.0
+  "new_tp": 2310.0,
+  "partial_close": 0.5
 }}
 {{
   "action": "hold",
@@ -269,4 +274,4 @@ Indicators (15m): {ind_15m.dict()}
 
 @app.get("/")
 async def root():
-    return {"message": "SmartGPT EA SCALPER - London/NY session, EMA/LWMA/SMMA confluence, aggressive trailing stop"}
+    return {"message": "SmartGPT EA SCALPER - London/NY session, EMA/LWMA/SMMA confluence, aggressive trailing stop, partial profits"}
