@@ -233,7 +233,7 @@ Indicators (15m): {ind_15m.dict()}
     try:
         client = openai.OpenAI()
         chat = client.chat.completions.create(
-            model="gpt-4o",
+            model="gpt-3.5-turbo",
             messages=[
                 {"role": "system", "content": "You are an elite, disciplined, risk-aware SCALPER trade assistant. Reply ONLY in valid JSON."},
                 {"role": "user", "content": prompt}
