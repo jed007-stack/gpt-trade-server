@@ -162,7 +162,8 @@ async def gpt_manage(wrapper: TradeWrapper):
         f"ADX: {ind_1m.adx} | MFI: {ind_1m.mfi} | WillR: {ind_1m.williams_r}"
     )
 
-  prompt = f"""
+    # GPT PROMPT
+    prompt = f"""
 You are a sniper, scalping-focused trading assistant for prop firm challenges.
 
 **Time/Session filter:** Trade ONLY during London or New York session, never overnight or on weekends but its ok to take profit of trades. 
@@ -229,7 +230,6 @@ Indicators (1m): {ind_1m.dict()}
 Indicators (5m): {ind_5m.dict()}
 Indicators (15m): {ind_15m.dict()}
 """
-
 
     try:
         client = openai.OpenAI()
