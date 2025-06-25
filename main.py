@@ -166,7 +166,7 @@ async def gpt_manage(wrapper: TradeWrapper):
     prompt = f"""
 You are a sniper, scalping-focused trading assistant for prop firm challenges.
 
-**Time/Session filter:** Trade ONLY during London or New York session, never overnight or on weekends.
+**Time/Session filter:** Trade ONLY during London or New York session, never overnight or on weekends but its ok to take profit of trades. 
 
 **Crossover signals:**  
 - The latest cross_signal from the EA is: {cross_signal}  
@@ -186,10 +186,10 @@ You are a sniper, scalping-focused trading assistant for prop firm challenges.
 - Skip all ambiguous, low-confidence, or non-session signals.
 
 **Exit/scalp rules:**  
-- Use an aggressive trailing stop as soon as trade is 0.5xSL in profit; move SL to breakeven and trail by 0.5xSL. If more profit, trail tighter.  
+- Use an aggressive trailing stop as soon as trade is 0.15xSL in profit; move SL to breakeven and trail by 0.3xSL. If more profit, trail tighter.  
 - Exit fully if at least 2 indicators warn of a reversal, or structure breaks.
 - Always provide "new_sl" if trailing, and "new_tp" if next S/R is close.
-
+- take partial profits when in profit by 100
 **SL/TP:**  
 - SL: Just beyond nearest 1m or 5m swing high/low (or min 1xATR)
 - TP: At least 2xSL or next major S/R.
