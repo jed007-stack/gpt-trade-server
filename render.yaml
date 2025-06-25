@@ -2,9 +2,9 @@ services:
   - type: web
     name: gpt-trade-server
     env: python
-    plan: starter
-    buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT --limit-max-request-size 20000
+    plan: standard
+    buildCommand: pip install -r gpt-trade-server/requirements.txt
+    startCommand: uvicorn gpt-trade-server.main:app --host 0.0.0.0 --port $PORT --limit-max-request-size 20000
     envVars:
       - key: OPENAI_API_KEY
         sync: false
