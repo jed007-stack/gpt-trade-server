@@ -11,7 +11,11 @@ from datetime import datetime, time
 import pytz
 
 # === Setup ===
-openai.api_key = os.getenv("OPENAI_API_KEY")
+api_key = os.getenv("OPENAI_API_KEY")
+if not api_key:
+    raise RuntimeError("OPENAI_API_KEY environment variable is not set")
+openai_client = openai.OpenAI(api_key=api_key)
+
 app = FastAPI()
 logging.basicConfig(level=logging.INFO)
 
@@ -78,14 +82,14 @@ class TradeData(BaseModel):
     update_type: Optional[str] = None
     cross_signal: Optional[str] = None
     cross_meaning: Optional[str] = None
-    indicators: Optional[Indicators] = None       # 1m
-    h1_indicators: Optional[Indicators] = None    # 5m
-    h4_indicators: Optional[Indicators] = None    # 15m
+    indicators: Optional[Indicators] = None
+    h1_indicators: Optional[Indicators] = None
+    h4_indicators: Optional[Indicators] = None
     position: Optional[Position] = None
     account: Optional[Account] = None
-    candles1: Optional[List[Candle]] = []
-    candles2: Optional[List[Candle]] = []
-    candles3: Optional[List[Candle]] = []
+    candles1: Optional[List[Candle]] = None
+    candles2: Optional[List[Candle]] = None
+    candles3: Optional[List[Candle]] = None
     news_override: Optional[bool] = False
     live_candle1: Optional[Candle] = None
     live_candle2: Optional[Candle] = None
@@ -138,16 +142,14 @@ async def gpt_manage(wrapper: TradeWrapper):
     ind_15m = trade.h4_indicators or Indicators()
     pos = trade.position
     acc = trade.account or Account(balance=10000, equity=10000, margin=None)
-    candles_1m = trade.candles1[-5:] if trade.candles1 else []
-    candles_5m = trade.candles2[-5:] if trade.candles2 else []
-    candles_15m = trade.candles3[-5:] if trade.candles3 else []
+    candles_1m = (trade.candles1 or [])[-5:]
+    candles_5m = (trade.candles2 or [])[-5:]
+    candles_15m = (trade.candles3 or [])[-5:]
     cross_signal = trade.cross_signal or "none"
     cross_meaning = trade.cross_meaning or "none"
 
-    # LOG incoming payload
     logging.info(f"🔻 RAW PAYLOAD:\n{wrapper.json()}\n---")
 
-    # SESSION FILTER
     if not in_london_ny_session():
         logging.info("⏳ Out of London/NY session, no new trades.")
         return JSONResponse(content={"action": "hold", "reason": "Outside London/New York session", "confidence": 0})
@@ -156,7 +158,6 @@ async def gpt_manage(wrapper: TradeWrapper):
         logging.warning("🛑 News conflict detected. GPT override active.")
         return JSONResponse(content={"action": "hold", "reason": "News conflict — override active", "confidence": 0})
 
-    # LOGGING SUMMARY
     logging.info(f"✅ {trade.symbol} | 1m Dir: {getattr(pos, 'direction', None)} | {getattr(pos, 'open_price', None)} → {getattr(pos, 'pnl', None)}")
     logging.info(
         f"📊 1m BB: ({ind_1m.bb_upper}, {ind_1m.bb_middle}, {ind_1m.bb_lower}) | "
@@ -240,8 +241,7 @@ Indicators (15m): {ind_15m.dict()}
     logging.info(f"\n========= SENDING PROMPT TO GPT =========\n{prompt}\n========================================\n")
 
     try:
-        client = openai.OpenAI()
-        chat = client.chat.completions.create(
+        chat = openai_client.chat.completions.create(
             model="gpt-3.5-turbo",
             messages=[
                 {"role": "system", "content": "You are an elite, disciplined, risk-aware SCALPER trade assistant. Reply ONLY in valid JSON."},
@@ -291,7 +291,6 @@ Indicators (15m): {ind_15m.dict()}
                 action["action"] = "close"
                 action["reason"] += " | Closing profitable trade before 22:00 UK to avoid spread widening."
 
-        # Log decision and return
         logging.info(f"📝 GPT Action: {action.get('action')} | Lot: {action.get('lot', 1)} | Confidence: {action.get('confidence', 0)} | Reason: {action.get('reason','(none)')}")
         if action.get("action") in allowed:
             return JSONResponse(content=action)
