@@ -166,7 +166,7 @@ async def gpt_manage(wrapper: TradeWrapper):
     prompt = f"""
 You are a sniper, scalping-focused trading assistant for prop firm challenges.
 
-**Time/Session filter:** Trade ONLY during London or New York session, never overnight or on weekends but its ok to take profit of trades. 
+**Time/Session filter:** Only manage open positions between 21:00 and 23:00 UK time. Do not open new trades during this time window.
 
 **Crossover signals:**  
 - The latest cross_signal from the EA is: {cross_signal}  
