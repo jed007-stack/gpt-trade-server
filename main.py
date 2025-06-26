@@ -188,7 +188,7 @@ Only reply "hold" if there is a direct conflict or a clear lack of confluence.
 - At 1% profit, use a 0.30% trailing stop.
 - Take partial profit if unrealized profit > 0.10% of balance. Take another partial at 0.20%.
 - Exit the rest if 2+ indicators reverse or structure breaks.
-- Always include "new_sl" and "partial_close" if relevant.
+(Unrealized profit = pos.pnl, balance = account.balance)
 
 
 **SL/TP:**  
