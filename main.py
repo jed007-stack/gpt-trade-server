@@ -184,9 +184,8 @@ Only reply "hold" if there is a direct conflict or a clear lack of confluence.
 - If ALL indicators align (1m, 5m, 15m), lot size should be 2. Otherwise, use 1.
 
 **Exit/scalp:**
-- Move SL to breakeven after 15 pips profit.
-- At 20 pips profit, use a 15-pip trailing stop.
-- At 40 pips, tighten trailing stop to 10 pips.
+- Move SL to breakeven after 30 pips profit.
+- At 30 pips profit, use a 20-pip trailing stop.
 - Take partial profits (close 30–50%) after 40+ pips profit; at 100+ pips, take another partial.
 - Exit the rest if 2+ indicators reverse or structure breaks.
 - Always include "new_sl" and "partial_close" if relevant.
