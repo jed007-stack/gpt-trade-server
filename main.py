@@ -193,6 +193,7 @@ Only reply "hold" if there is a direct conflict or a clear lack of confluence.
 - Never move SL tighter than the last swing low/high unless clear reversal.
 
 **SL/TP:**  
+- always suggest New SL and TP 
 - SL: Just beyond nearest 1m or 5m swing high/low (or min 1xATR)
 - TP: At least 2xSL or next major S/R.
 
