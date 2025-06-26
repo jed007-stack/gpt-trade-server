@@ -114,17 +114,14 @@ def flatten_action(decision):
             pass
     return {"action": "hold", "reason": "Could not decode action.", "confidence": 0}
 
-def in_london_ny_session(utc_dt=None):
-    utc_now = utc_dt or datetime.utcnow()
+def uk_time_now():
+    utc_now = datetime.utcnow()
     london = pytz.timezone('Europe/London')
-    london_now = utc_now.replace(tzinfo=pytz.utc).astimezone(london)
-    l_start = time(7, 0)
-    l_end   = time(16, 30)
-    n_start = time(13, 0)
-    n_end   = time(22, 0)
-    session = (l_start <= london_now.time() <= l_end) or (n_start <= london_now.time() <= n_end)
-    weekday = london_now.weekday()
-    return session and (weekday < 5)
+    return utc_now.replace(tzinfo=pytz.utc).astimezone(london)
+
+def is_between_uk_time(start_h, end_h):
+    now = uk_time_now().time()
+    return time(start_h, 0) <= now < time(end_h, 0)
 
 @app.post("/gpt/manage")
 async def gpt_manage(wrapper: TradeWrapper):
@@ -168,9 +165,10 @@ You are an elite, decisive prop firm scalper trade assistant.
 ***You must take every setup that meets the entry rules.*** 
 Only reply "hold" if there is a direct conflict or a clear lack of confluence.
 
-**Trade at all times except between 21:00 and 23:00 UK time.**
-- Between 21:00 and 23:00 UK time, you **must NOT open new trades**, but you **MUST actively manage and close open trades** if conditions warrant it.
-- Always prioritize closing any open trades that are in profit **before 22:00 UK time** to avoid high spreads.
+**Session/time rules:**
+- Trade at all times except between 21:00 and 23:00 UK time.
+- Between 21:00 and 23:00 UK, do NOT open new trades but continue to manage (move SL, take profit, close) existing positions as needed.
+- Always prioritize closing any trades in profit before 22:00 UK time to avoid spread widening.
 
 **Entry:**
 - The latest cross_signal from the EA is: {cross_signal}
@@ -276,6 +274,15 @@ Indicators (15m): {ind_15m.dict()}
                 if not action.get("new_sl") and pos.open_price:
                     action["new_sl"] = pos.open_price
                     action["reason"] += f" | SL moved to entry after partial"
+
+        # === TIME GUARD: Block new entries after 21:00, force closing profits before 22:00 ===
+        if pos and pos.pnl and acc:
+            if is_between_uk_time(21, 23) and action.get("action") in {"buy", "sell"}:
+                action["action"] = "hold"
+                action["reason"] += " | No new trades between 21:00 and 23:00 UK time."
+            if is_between_uk_time(21, 22) and pos.pnl > 0 and action.get("action") not in {"close", "hold"}:
+                action["action"] = "close"
+                action["reason"] += " | Closing profitable trade before 22:00 UK to avoid spread widening."
 
         # Log decision and return
         logging.info(f"📝 GPT Action: {action.get('action')} | Lot: {action.get('lot', 1)} | Confidence: {action.get('confidence', 0)} | Reason: {action.get('reason','(none)')}")
