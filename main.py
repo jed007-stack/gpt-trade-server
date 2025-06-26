@@ -166,7 +166,7 @@ async def gpt_manage(wrapper: TradeWrapper):
     prompt = f"""
 You are a sniper, scalping-focused trading assistant for prop firm challenges.
 
-**Time/Session filter:** Only manage open positions between 21:00 and 23:00 UK time. Do not open new trades during this time window.
+**Time/Session filter:** You should trade at all times except between 21:00 and 23:00 UK time. During that time window, do not open any new trades, but you can continue managing open positions (e.g. move stop loss, take profit, or close trades).
 
 **Crossover signals:**  
 - The latest cross_signal from the EA is: {cross_signal}  
