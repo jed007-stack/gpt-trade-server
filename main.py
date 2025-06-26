@@ -162,48 +162,46 @@ async def gpt_manage(wrapper: TradeWrapper):
         f"ADX: {ind_1m.adx} | MFI: {ind_1m.mfi} | WillR: {ind_1m.williams_r}"
     )
 
-    # GPT PROMPT
+    # ========== GPT PROMPT ==========
     prompt = f"""
-You are a sniper, scalping-focused trading assistant for prop firm challenges.
+You are an elite, decisive prop firm scalper trade assistant. 
+***You must take every setup that meets the entry rules.*** 
+Only reply "hold" if there is a direct conflict or a clear lack of confluence.
 
-**Time/Session filter:** You should trade at all times except between 21:00 and 23:00 UK time. During that time window, do not open any new trades, but you can continue managing open positions (e.g. move stop loss, take profit, or close trades).
+**Trade at all times except between 21:00 and 23:00 UK time.**
 
-**Crossover signals:**  
-- The latest cross_signal from the EA is: {cross_signal}  
-- The latest cross_meaning from the EA is: {cross_meaning}  
-- Use this as the primary directional bias (example: if buy_cross, only look for buy setups; if sell_cross, only look for sells).
-
-**Entry rules:**  
-- Only consider a trade if 1m EMA/LWMA cross matches the trend of at least one higher timeframe (5m or 15m).  
-- Require confluence: At least 3 of these confirm for entry:  
+**Entry:**
+- The latest cross_signal from the EA is: {cross_signal}
+- The latest cross_meaning from the EA is: {cross_meaning}
+- Only take trades if the 1m EMA/LWMA cross matches the trend of at least one higher timeframe (5m or 15m).
+- If you detect 3 or more of the following ("confluences") with no direct conflicts, issue a trade ("buy" or "sell"). 
   - MACD
   - RSI or Stochastic
   - ADX > 20
   - Ichimoku agrees
   - Bollinger Bands breakout or squeeze
   - Candlestick reversal at a key level (S/R/fibonacci)
-- If ALL indicators align on 1m and 5m or 15m, upsize to "lot":2 (otherwise lot 1).
-- look for minimum 5/10 confluence. 
+- If ALL indicators align (1m, 5m, 15m), lot size should be 2. Otherwise, use 1.
 
-**Exit/scalp rules (use fixed pips, not fractions of SL):**
-- Only move SL to entry (breakeven) after the trade is in profit by at least **15 pips**. This allows for natural pullbacks.
-- Once trade is **20 pips in profit**, activate trailing stop at **15 pips behind price**.
-- If profit reaches **40 pips**, tighten trailing stop to **10 pips behind price** to lock in more profit.
-- Take partial profits (close 30–50% or reduce lot size) **only after the trade is 25+ pips in profit**.
-- If profit grows further (**40+ pips**), take another partial (close an additional 30%).
-- If at least 2 indicators signal a reversal or structure breaks, exit the rest.
-- Always include "new_sl" for trailing and "partial_close" if taking a partial.
-- Never move SL tighter than the last swing low/high unless a reversal is detected.
+**Exit/scalp:**
+- Move SL to breakeven after 15 pips profit.
+- At 20 pips profit, use a 15-pip trailing stop.
+- At 40 pips, tighten trailing stop to 10 pips.
+- Take partial profits (close 30–50%) after 25+ pips profit; at 40+ pips, take another partial.
+- Exit the rest if 2+ indicators reverse or structure breaks.
+- Always include "new_sl" and "partial_close" if relevant.
+- Never move SL tighter than the last swing low/high unless clear reversal.
 
 **SL/TP:**  
 - SL: Just beyond nearest 1m or 5m swing high/low (or min 1xATR)
 - TP: At least 2xSL or next major S/R.
 
-**Quality filter:**  
-- Always state all confluences in 'reason'.
-- Default to “hold” unless a real edge is present.
+**Quality filter:**
+- If at least 3 confluences and the main signal matches a higher timeframe, always take a trade.
+- Default to "hold" only if clear conflict or no setup.
 - Always include "confidence" (1-10).
-- Do NOT allow trades that risk being held after 21:00 London time or over the weekend.
+- Do NOT allow trades that risk being held after 21:00 UK or over the weekend.
+- Always give all confluences in 'reason'.
 
 Example JSON reply:
 {{
@@ -217,7 +215,7 @@ Example JSON reply:
 }}
 {{
   "action": "hold",
-  "reason": "Stochastic and BB squeeze, 5m trend flat. No edge.",
+  "reason": "5m trend flat, or conflict between MACD and price action.",
   "confidence": 3
 }}
 
@@ -231,6 +229,8 @@ Indicators (5m): {ind_5m.dict()}
 Indicators (15m): {ind_15m.dict()}
 """
 
+    logging.info(f"\n========= SENDING PROMPT TO GPT =========\n{prompt}\n========================================\n")
+
     try:
         client = openai.OpenAI()
         chat = client.chat.completions.create(
@@ -240,7 +240,7 @@ Indicators (15m): {ind_15m.dict()}
                 {"role": "user", "content": prompt}
             ],
             max_tokens=350,
-            temperature=0.13,
+            temperature=0.11,
             response_format={"type": "json_object"}
         )
         decision = chat.choices[0].message.content.strip()
@@ -258,7 +258,6 @@ Indicators (15m): {ind_15m.dict()}
         if action.get("action") in {"buy", "sell"} and "lot" not in action:
             action["lot"] = 2 if "double" in (action.get("reason") or "").lower() or conf >= 9 else 1
 
-        # Ensure reasoning present
         if "reason" not in action or not action["reason"]:
             action["reason"] = "No reasoning returned by GPT."
 
