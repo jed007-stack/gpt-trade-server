@@ -187,13 +187,13 @@ Only reply "hold" if there is a direct conflict or a clear lack of confluence.
 - Move SL to breakeven after 15 pips profit.
 - At 20 pips profit, use a 15-pip trailing stop.
 - At 40 pips, tighten trailing stop to 10 pips.
-- Take partial profits (close 30–50%) after 25+ pips profit; at 40+ pips, take another partial.
+- Take partial profits (close 30–50%) after 40+ pips profit; at 100+ pips, take another partial.
 - Exit the rest if 2+ indicators reverse or structure breaks.
 - Always include "new_sl" and "partial_close" if relevant.
-- Never move SL tighter than the last swing low/high unless clear reversal.
+
 
 **SL/TP:**  
-- always suggest New SL and TP 
+- always suggest New SL and TP based on high timeframe. 
 - SL: Just beyond nearest 1m or 5m swing high/low (or min 1xATR)
 - TP: At least 2xSL or next major S/R.
 
