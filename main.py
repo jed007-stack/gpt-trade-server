@@ -174,7 +174,7 @@ Only reply "hold" if there is a direct conflict or a clear lack of confluence.
 - The latest cross_signal from the EA is: {cross_signal}
 - The latest cross_meaning from the EA is: {cross_meaning}
 - Only take trades if the 1m EMA/LWMA cross matches the trend of at least one higher timeframe (5m or 15m).
-- If you detect 3 or more of the following ("confluences") with no direct conflicts, issue a trade ("buy" or "sell"). 
+- If you detect 3 or more of the following ("confluences") with no direct conflicts, issue a trade ("buy" or "sell"): 
   - MACD
   - RSI or Stochastic
   - ADX > 20
@@ -184,15 +184,16 @@ Only reply "hold" if there is a direct conflict or a clear lack of confluence.
 - If ALL indicators align (1m, 5m, 15m), lot size should be 2. Otherwise, use 1.
 
 **Exit/scalp:**
-- Move SL to breakeven after 0.40% account profit.
-- At 1% profit, use a 0.30% trailing stop.
-- Take partial profit if unrealized profit > 0.10% of balance. Take another partial at 0.20%.
-- Exit the rest if 2+ indicators reverse or structure breaks.
-(Unrealized profit = pos.pnl, balance = account.balance)
-
+- Only take partial profit if unrealized profit (pos.pnl) >= 0.10% of account.balance (e.g. £100 on £100,000). Never partial close near break-even.
+- Take second partial only if pos.pnl >= 0.20% of account.balance.
+- After first partial, always move SL to entry (breakeven).
+- Move SL to breakeven after first partial profit is taken, not before.
+- At 1% profit (pos.pnl >= 1% of balance), use a 0.30% trailing stop.
+- Exit the rest if 2+ indicators reverse or structure breaks, but only if trade is in profit.
+(Unrealized profit = pos.pnl, Balance = account.balance)
 
 **SL/TP:**  
-- always suggest New SL and TP based on high timeframe. 
+- Always suggest new SL and TP based on high timeframe. 
 - SL: Just beyond nearest 1m or 5m swing high/low (or min 1xATR)
 - TP: At least 2xSL or next major S/R.
 
@@ -260,6 +261,19 @@ Indicators (15m): {ind_15m.dict()}
 
         if "reason" not in action or not action["reason"]:
             action["reason"] = "No reasoning returned by GPT."
+
+        # === GUARD: No partial close under 0.1% profit, and add SL to entry after partial 1 ===
+        if action.get("partial_close") and pos and acc:
+            min_partial = acc.balance * 0.001  # 0.10% of balance
+            if pos.pnl < min_partial:
+                logging.warning(f"🚫 Blocking early partial close — PnL {pos.pnl:.2f} < {min_partial:.2f}")
+                action.pop("partial_close", None)
+                action["reason"] += f" (partial blocked — not enough profit)"
+            else:
+                # After first partial, move SL to entry if not already set
+                if not action.get("new_sl") and pos.open_price:
+                    action["new_sl"] = pos.open_price
+                    action["reason"] += f" | SL moved to entry after partial"
 
         # Log decision and return
         logging.info(f"📝 GPT Action: {action.get('action')} | Lot: {action.get('lot', 1)} | Confidence: {action.get('confidence', 0)} | Reason: {action.get('reason','(none)')}")
