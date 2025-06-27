@@ -128,7 +128,7 @@ def is_between_uk_time(start_h, end_h):
     return time(start_h, 0) <= now < time(end_h, 0)
 
 def in_london_ny_session():
-    # London: 08:00–17:00 UK, NY: 13:00–22:00 UK
+    # London: 07:00–17:00 UK, NY: 13:00–21:00 UK
     now = uk_time_now().time()
     is_london = time(8, 0) <= now < time(17, 0)
     is_ny = time(13, 0) <= now < time(22, 0)
