@@ -184,6 +184,7 @@ Only reply "hold" if there is a direct conflict or a clear lack of confluence.
 - Only take trades if the 1m EMA/LWMA cross matches the trend of at least one higher timeframe (5m or 15m).
 - If you detect 3 or more of the following ("confluences") with no direct conflicts, issue a trade ("buy" or "sell"): 
   - MACD
+  - SMMA
   - RSI or Stochastic
   - ADX > 20
   - Ichimoku agrees
