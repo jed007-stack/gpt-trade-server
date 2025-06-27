@@ -82,14 +82,14 @@ class TradeData(BaseModel):
     update_type: Optional[str] = None
     cross_signal: Optional[str] = None
     cross_meaning: Optional[str] = None
-    indicators: Optional[Indicators] = None
-    h1_indicators: Optional[Indicators] = None
-    h4_indicators: Optional[Indicators] = None
+    indicators: Optional[Indicators] = None     # m5
+    h1_indicators: Optional[Indicators] = None  # m15
+    h4_indicators: Optional[Indicators] = None  # m30
     position: Optional[Position] = None
     account: Optional[Account] = None
-    candles1: Optional[List[Candle]] = None
-    candles2: Optional[List[Candle]] = None
-    candles3: Optional[List[Candle]] = None
+    candles1: Optional[List[Candle]] = None     # m5
+    candles2: Optional[List[Candle]] = None     # m15
+    candles3: Optional[List[Candle]] = None     # m30
     news_override: Optional[bool] = False
     live_candle1: Optional[Candle] = None
     live_candle2: Optional[Candle] = None
@@ -137,14 +137,14 @@ def in_london_ny_session():
 @app.post("/gpt/manage")
 async def gpt_manage(wrapper: TradeWrapper):
     trade = wrapper.data
-    ind_1m = trade.indicators or Indicators()
-    ind_5m = trade.h1_indicators or Indicators()
-    ind_15m = trade.h4_indicators or Indicators()
+    ind_m5 = trade.indicators or Indicators()
+    ind_m15 = trade.h1_indicators or Indicators()
+    ind_m30 = trade.h4_indicators or Indicators()
     pos = trade.position
     acc = trade.account or Account(balance=10000, equity=10000, margin=None)
-    candles_1m = (trade.candles1 or [])[-5:]
-    candles_5m = (trade.candles2 or [])[-5:]
-    candles_15m = (trade.candles3 or [])[-5:]
+    candles_m5 = (trade.candles1 or [])[-5:]
+    candles_m15 = (trade.candles2 or [])[-5:]
+    candles_m30 = (trade.candles3 or [])[-5:]
     cross_signal = trade.cross_signal or "none"
     cross_meaning = trade.cross_meaning or "none"
 
@@ -158,13 +158,13 @@ async def gpt_manage(wrapper: TradeWrapper):
         logging.warning("🛑 News conflict detected. GPT override active.")
         return JSONResponse(content={"action": "hold", "reason": "News conflict — override active", "confidence": 0})
 
-    logging.info(f"✅ {trade.symbol} | 1m Dir: {getattr(pos, 'direction', None)} | {getattr(pos, 'open_price', None)} → {getattr(pos, 'pnl', None)}")
+    logging.info(f"✅ {trade.symbol} | m5 Dir: {getattr(pos, 'direction', None)} | {getattr(pos, 'open_price', None)} → {getattr(pos, 'pnl', None)}")
     logging.info(
-        f"📊 1m BB: ({ind_1m.bb_upper}, {ind_1m.bb_middle}, {ind_1m.bb_lower}) | "
-        f"Stoch: K={ind_1m.stoch_k}, D={ind_1m.stoch_d}, J={ind_1m.stoch_j} | "
-        f"MACD: {getattr(ind_1m.macd, 'main', None)}/{getattr(ind_1m.macd, 'signal', None)} | "
-        f"EMA: {ind_1m.ema} LWMA: {ind_1m.lwma} SMMA: {ind_1m.smma} | "
-        f"ADX: {ind_1m.adx} | MFI: {ind_1m.mfi} | WillR: {ind_1m.williams_r}"
+        f"📊 m5 BB: ({ind_m5.bb_upper}, {ind_m5.bb_middle}, {ind_m5.bb_lower}) | "
+        f"Stoch: K={ind_m5.stoch_k}, D={ind_m5.stoch_d}, J={ind_m5.stoch_j} | "
+        f"MACD: {getattr(ind_m5.macd, 'main', None)}/{getattr(ind_m5.macd, 'signal', None)} | "
+        f"EMA: {ind_m5.ema} LWMA: {ind_m5.lwma} SMMA: {ind_m5.smma} | "
+        f"ADX: {ind_m5.adx} | MFI: {ind_m5.mfi} | WillR: {ind_m5.williams_r}"
     )
 
     # ========== GPT PROMPT ==========
@@ -181,7 +181,7 @@ Only reply "hold" if there is a direct conflict or a clear lack of confluence.
 **Entry:**
 - The latest cross_signal from the EA is: {cross_signal}
 - The latest cross_meaning from the EA is: {cross_meaning}
-- Only take trades if the 1m EMA/LWMA cross matches the trend of at least one higher timeframe (5m or 15m).
+- Only take trades if the m5 EMA/LWMA cross matches the trend of at least one higher timeframe (m15 or m30).
 - If you detect 3 or more of the following ("confluences") with no direct conflicts, issue a trade ("buy" or "sell"): 
   - MACD
   - SMMA
@@ -190,7 +190,7 @@ Only reply "hold" if there is a direct conflict or a clear lack of confluence.
   - Ichimoku agrees
   - Bollinger Bands breakout or squeeze
   - Candlestick reversal at a key level (S/R/fibonacci)
-- If ALL indicators align (1m, 5m, 15m), lot size should be 2. Otherwise, use 1.
+- If ALL indicators align (m5, m15, m30), lot size should be 2. Otherwise, use 1.
 
 **Exit/scalp:**
 - When unrealized profit (pos.pnl) >= 0.10% of account.balance (e.g. £100 on £100,000), always reply with BOTH a partial profit close (e.g. "partial_close": 0.5) AND moving the stop loss to entry ("new_sl": position.open_price) in the SAME response. Never partial close near break-even.
@@ -201,7 +201,7 @@ Only reply "hold" if there is a direct conflict or a clear lack of confluence.
 
 **SL/TP:**  
 - Always suggest new SL and TP based on high timeframe. 
-- SL: Just beyond nearest 1m or 5m swing high/low (or min 1xATR)
+- SL: Just beyond nearest m5 or m15 swing high/low (or min 1xATR)
 - TP: At least 2xSL or next major S/R.
 
 **Quality filter:**
@@ -221,7 +221,7 @@ Example JSON reply:
 }}
 {{
   "action": "buy",
-  "reason": "1m EMA over LWMA, 5m uptrend, MACD and ADX > 20, BB breakout. Aggressive trailing stop set, partial close triggered.",
+  "reason": "m5 EMA over LWMA, m15 uptrend, MACD and ADX > 20, BB breakout. Aggressive trailing stop set, partial close triggered.",
   "confidence": 9,
   "lot": 2,
   "new_sl": 2301.5,
@@ -230,7 +230,7 @@ Example JSON reply:
 }}
 {{
   "action": "hold",
-  "reason": "5m trend flat, or conflict between MACD and price action.",
+  "reason": "m15 trend flat, or conflict between MACD and price action.",
   "confidence": 3
 }}
 
@@ -238,10 +238,10 @@ Current Cross Signal: {cross_signal}
 Current Cross Meaning: {cross_meaning}
 Current Position: {pos.dict() if pos else "None"}
 Current Account: {acc.dict() if acc else "None"}
-Recent 1m Candles: {[candle.dict() for candle in candles_1m]}
-Indicators (1m): {ind_1m.dict()}
-Indicators (5m): {ind_5m.dict()}
-Indicators (15m): {ind_15m.dict()}
+Recent m5 Candles: {[candle.dict() for candle in candles_m5]}
+Indicators (m5): {ind_m5.dict()}
+Indicators (m15): {ind_m15.dict()}
+Indicators (m30): {ind_m30.dict()}
 """
 
     logging.info(f"\n========= SENDING PROMPT TO GPT =========\n{prompt}\n========================================\n")
