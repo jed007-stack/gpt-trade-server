@@ -200,10 +200,12 @@ Only reply "hold" if there is a direct conflict or a clear lack of confluence.
 - Exit the rest if 2+ indicators reverse or structure breaks, but only if trade is in profit.
 (Unrealized profit = pos.pnl, Balance = account.balance)
 
-**SL/TP:**  
-- Always suggest new SL and TP based on high timeframe. 
-- SL: Just beyond nearest 1m or 5m swing high/low (or min 1xATR)
-- TP: At least 2xSL or next major S/R.
+**SL/TP and Trailing:**
+- Set take profit at the next major support/resistance or swing level from the higher timeframe (M5 or M15).
+- If price reaches the level where you would typically have placed a TP on the 1m timeframe, immediately begin to trail the stop loss tightly behind price, instead of using a fixed TP.
+- This allows you to maximize profit if momentum continues, but still lock in gains if price reverses.
+- SL: Just beyond nearest 1m or 5m swing high/low (or min 1xATR).
+- TP: At least 2x SL or next major S/R on a higher timeframe. Never use a tight TP—always aim to catch the bulk of the move.
 
 **Quality filter:**
 - If at least 3 confluences and the main signal matches a higher timeframe, always take a trade.
