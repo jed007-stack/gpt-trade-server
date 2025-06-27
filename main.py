@@ -212,6 +212,13 @@ Only reply "hold" if there is a direct conflict or a clear lack of confluence.
 
 Example JSON reply:
 {{
+  "action": "hold",
+  "reason": "Partial profit at $100, SL moved to entry as required.",
+  "confidence": 9,
+  "partial_close": 0.5,
+  "new_sl": 2310.0
+}}
+{{
   "action": "buy",
   "reason": "1m EMA over LWMA, 5m uptrend, MACD and ADX > 20, BB breakout. Aggressive trailing stop set, partial close triggered.",
   "confidence": 9,
