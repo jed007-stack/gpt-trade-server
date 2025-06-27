@@ -192,20 +192,16 @@ Only reply "hold" if there is a direct conflict or a clear lack of confluence.
 - If ALL indicators align (1m, 5m, 15m), lot size should be 2. Otherwise, use 1.
 
 **Exit/scalp:**
-- Only take partial profit if unrealized profit (pos.pnl) >= 0.10% of account.balance (e.g. £100 on £100,000). Never partial close near break-even.
+- When unrealized profit (pos.pnl) >= 0.10% of account.balance (e.g. £100 on £100,000), always reply with BOTH a partial profit close (e.g. "partial_close": 0.5) AND moving the stop loss to entry ("new_sl": position.open_price) in the SAME response. Never partial close near break-even.
 - Take second partial only if pos.pnl >= 0.20% of account.balance.
-- After first partial, always move SL to entry (breakeven).
-- Move SL to breakeven after first partial profit is taken, not before.
 - At 1% profit (pos.pnl >= 1% of balance), use a 0.30% trailing stop.
 - Exit the rest if 2+ indicators reverse or structure breaks, but only if trade is in profit.
 (Unrealized profit = pos.pnl, Balance = account.balance)
 
-**SL/TP and Trailing:**
-- Set take profit at the next major support/resistance or swing level from the higher timeframe (M5 or M15).
-- If price reaches the level where you would typically have placed a TP on the 1m timeframe, immediately begin to trail the stop loss tightly behind price, instead of using a fixed TP.
-- This allows you to maximize profit if momentum continues, but still lock in gains if price reverses.
-- SL: Just beyond nearest 1m or 5m swing high/low (or min 1xATR).
-- TP: At least 2x SL or next major S/R on a higher timeframe. Never use a tight TP—always aim to catch the bulk of the move.
+**SL/TP:**  
+- Always suggest new SL and TP based on high timeframe. 
+- SL: Just beyond nearest 1m or 5m swing high/low (or min 1xATR)
+- TP: At least 2xSL or next major S/R.
 
 **Quality filter:**
 - If at least 3 confluences and the main signal matches a higher timeframe, always take a trade.
