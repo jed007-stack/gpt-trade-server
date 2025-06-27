@@ -193,7 +193,7 @@ Only reply "hold" if there is a direct conflict or a clear lack of confluence.
 - If ALL indicators align (m5, m15, m30), lot size should be 2. Otherwise, use 1.
 
 **Exit/scalp:**
-- When unrealized profit (pos.pnl) >= 0.10% of account.balance (e.g. £100 on £100,000), always reply with BOTH a partial profit close (e.g. "partial_close": 0.5) AND moving the stop loss to entry ("new_sl": position.open_price) in the SAME response. Never partial close near break-even.
+- When unrealized profit (pos.pnl) >= 0.10% of account.balance, your response MUST ALWAYS INCLUDE BOTH: "partial_close": 0.5 AND "new_sl": position.open_price IN THE SAME JSON. Never provide only one. Never partial close near break-even. If you cannot do both together, reply "hold" with an explanation.
 - Take second partial only if pos.pnl >= 0.20% of account.balance.
 - At 1% profit (pos.pnl >= 1% of balance), use a 0.30% trailing stop.
 - Exit the rest if 2+ indicators reverse or structure breaks, but only if trade is in profit.
@@ -263,30 +263,34 @@ Indicators (m30): {ind_m30.dict()}
         action = flatten_action(decision)
         allowed = {"hold", "close", "trail_sl", "trail_tp", "buy", "sell"}
 
-        # Confidence filter: only trade if 7+
         conf = action.get("confidence", 0)
         if action.get("action") in {"buy", "sell"} and conf < 7:
             action["action"] = "hold"
             action["reason"] = (action.get("reason") or "") + " (confidence too low for entry)"
-        # Lot sizing for high confluence
         if action.get("action") in {"buy", "sell"} and "lot" not in action:
             action["lot"] = 2 if "double" in (action.get("reason") or "").lower() or conf >= 9 else 1
 
         if "reason" not in action or not action["reason"]:
             action["reason"] = "No reasoning returned by GPT."
 
-        # === GUARD: No partial close under 0.1% profit, and add SL to entry after partial 1 ===
-        if action.get("partial_close") and pos and acc:
-            min_partial = acc.balance * 0.001  # 0.10% of balance
-            if pos.pnl < min_partial:
-                logging.warning(f"🚫 Blocking early partial close — PnL {pos.pnl:.2f} < {min_partial:.2f}")
-                action.pop("partial_close", None)
-                action["reason"] += f" (partial blocked — not enough profit)"
-            else:
-                # After first partial, move SL to entry if not already set
-                if not action.get("new_sl") and pos.open_price:
+        # === ENFORCE: Both partial_close AND new_sl must be present at required profit ===
+        if pos and acc:
+            min_partial = acc.balance * 0.001
+            if pos.pnl and pos.pnl >= min_partial:
+                has_partial = "partial_close" in action and action["partial_close"] is not None
+                has_newsl = "new_sl" in action and action["new_sl"] is not None
+                # If one is present without the other, force hold with error
+                if has_partial != has_newsl:
+                    logging.warning("🚫 Both partial_close and new_sl must be present together at threshold.")
+                    return JSONResponse(content={
+                        "action": "hold",
+                        "reason": "GPT did not return both partial_close AND new_sl at required profit. Must provide both together.",
+                        "confidence": 0
+                    })
+                # If both are present, ensure SL moves to entry if not already set
+                if has_partial and has_newsl and not action.get("new_sl") and pos.open_price:
                     action["new_sl"] = pos.open_price
-                    action["reason"] += f" | SL moved to entry after partial"
+                    action["reason"] += " | SL moved to entry after partial"
 
         # === TIME GUARD: Block new entries after 21:00, force closing profits before 22:00 ===
         if pos and pos.pnl and acc:
