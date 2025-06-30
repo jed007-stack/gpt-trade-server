@@ -82,14 +82,14 @@ class TradeData(BaseModel):
     update_type: Optional[str] = None
     cross_signal: Optional[str] = None
     cross_meaning: Optional[str] = None
-    indicators: Optional[Indicators] = None     # 1m
-    h1_indicators: Optional[Indicators] = None  # 5m
-    h4_indicators: Optional[Indicators] = None  # 15m
+    indicators: Optional[Indicators] = None     # 5m
+    h1_indicators: Optional[Indicators] = None  # 15m
+    h4_indicators: Optional[Indicators] = None  # 1h
     position: Optional[Position] = None
     account: Optional[Account] = None
-    candles1: Optional[List[Candle]] = None     # 1m
-    candles2: Optional[List[Candle]] = None     # 5m
-    candles3: Optional[List[Candle]] = None     # 15m
+    candles1: Optional[List[Candle]] = None     # 5m
+    candles2: Optional[List[Candle]] = None     # 15m
+    candles3: Optional[List[Candle]] = None     # 1h
     news_override: Optional[bool] = False
     live_candle1: Optional[Candle] = None
     live_candle2: Optional[Candle] = None
@@ -134,14 +134,14 @@ def is_friday_5pm_or_later():
 @app.post("/gpt/manage")
 async def gpt_manage(wrapper: TradeWrapper):
     trade = wrapper.data
-    ind_1m = trade.indicators or Indicators()
-    ind_5m = trade.h1_indicators or Indicators()
-    ind_15m = trade.h4_indicators or Indicators()
+    ind_5m = trade.indicators or Indicators()
+    ind_15m = trade.h1_indicators or Indicators()
+    ind_1h = trade.h4_indicators or Indicators()
     pos = trade.position
     acc = trade.account or Account(balance=10000, equity=10000, margin=None)
-    candles_1m = (trade.candles1 or [])[-5:]
-    candles_5m = (trade.candles2 or [])[-5:]
-    candles_15m = (trade.candles3 or [])[-5:]
+    candles_5m = (trade.candles1 or [])[-5:]
+    candles_15m = (trade.candles2 or [])[-5:]
+    candles_1h = (trade.candles3 or [])[-5:]
     cross_signal = trade.cross_signal or "none"
     cross_meaning = trade.cross_meaning or "none"
 
@@ -151,38 +151,37 @@ async def gpt_manage(wrapper: TradeWrapper):
         logging.warning("🛑 News conflict detected. GPT override active.")
         return JSONResponse(content={"action": "hold", "reason": "News conflict — override active", "confidence": 0})
 
-    logging.info(f"✅ {trade.symbol} | 1m Dir: {getattr(pos, 'direction', None)} | {getattr(pos, 'open_price', None)} → {getattr(pos, 'pnl', None)}")
+    logging.info(f"✅ {trade.symbol} | 5m Dir: {getattr(pos, 'direction', None)} | {getattr(pos, 'open_price', None)} → {getattr(pos, 'pnl', None)}")
     logging.info(
-        f"📊 1m BB: ({ind_1m.bb_upper}, {ind_1m.bb_middle}, {ind_1m.bb_lower}) | "
-        f"Stoch: K={ind_1m.stoch_k}, D={ind_1m.stoch_d}, J={ind_1m.stoch_j} | "
-        f"MACD: {getattr(ind_1m.macd, 'main', None)}/{getattr(ind_1m.macd, 'signal', None)} | "
-        f"EMA: {ind_1m.ema} LWMA: {ind_1m.lwma} SMMA: {ind_1m.smma} | "
-        f"ADX: {ind_1m.adx} | MFI: {ind_1m.mfi} | WillR: {ind_1m.williams_r}"
+        f"📊 5m BB: ({ind_5m.bb_upper}, {ind_5m.bb_middle}, {ind_5m.bb_lower}) | "
+        f"Stoch: K={ind_5m.stoch_k}, D={ind_5m.stoch_d}, J={ind_5m.stoch_j} | "
+        f"MACD: {getattr(ind_5m.macd, 'main', None)}/{getattr(ind_5m.macd, 'signal', None)} | "
+        f"EMA: {ind_5m.ema} LWMA: {ind_5m.lwma} SMMA: {ind_5m.smma} | "
+        f"ADX: {ind_5m.adx} | MFI: {ind_5m.mfi} | WillR: {ind_5m.williams_r}"
     )
 
-    # ========== GPT PROMPT ==========
     prompt = f"""
-You are a disciplined prop firm trading assistant.
+You are a decisive prop firm trading assistant.
 
-- The EA HANDLES ALL partial profits and moves the stop loss (SL) to breakeven.
+- The EA handles all partial profits and break-even moves.
 - **IF THE STOP LOSS IS AT BREAKEVEN (SL == entry price), YOU MUST NOT SUGGEST OR MOVE THE SL.**
 - DO NOT open any new trades after 17:00 UK time on Friday. Only close or manage existing trades.
 - DO NOT open any new trades between 21:00 and 23:00 UK time.
-- ALWAYS try to close profitable trades before 22:00 UK time or before the weekend.
+- Always try to close profitable trades before 22:00 UK time or before the weekend.
 - You CAN suggest a new take profit (TP) or a full close if necessary.
-- You MUST require at least 3 confluences for a new entry.
+- Require at least 3 confluences for a new entry.
 - ONLY reply in VALID JSON using the example format.
-- When replying "hold", ALWAYS explain the decision using actual, live indicator values or observations from the current context (price action, trend, indicator conflicts, market choppiness, etc). Never copy the instruction or use a template. Every "hold" must be a unique, context-specific explanation.
+- When replying "hold", ALWAYS explain the decision using the live indicator values or actual price action context. NEVER copy a template; your reason should be unique and reflect the real market.
 
 IMPORTANT:
 - DO NOT move or suggest a new SL if the SL is already at breakeven.
 - DO NOT suggest new entries after 17:00 UK Friday or between 21:00 and 23:00 UK time.
-- ONLY take entries when 1m EMA/LWMA cross matches the trend of 5m or 15m AND you have at least three confluences.
+- Only take entries when 5m EMA/LWMA cross matches the trend of 15m or 1H and you have at least three confluences.
 
 ENTRY RULES:
 - The latest cross_signal from the EA is: {cross_signal}
 - The latest cross_meaning from the EA is: {cross_meaning}
-- Only take trades if the 1m EMA/LWMA cross matches the trend of at least one higher timeframe (5m or 15m).
+- Only take trades if the 5m EMA/LWMA cross matches the trend of at least one higher timeframe (15m or 1H).
 - If you detect 3 or more of the following ("confluences") with no direct conflicts, issue a trade ("buy" or "sell"):
   - MACD
   - SMMA
@@ -191,7 +190,7 @@ ENTRY RULES:
   - Ichimoku agrees
   - Bollinger Bands breakout or squeeze
   - Candlestick reversal at a key level (S/R/fibonacci)
-- If ALL indicators align (1m, 5m, 15m), lot size should be 2. Otherwise, use 1.
+- If ALL indicators align (5m, 15m, 1H), lot size should be 2. Otherwise, use 1.
 
 EXIT/SCALP:
 - Do NOT suggest or move SL if SL is at breakeven (SL == entry price).
@@ -200,13 +199,13 @@ EXIT/SCALP:
 
 SL/TP:
 - Always suggest new SL and TP based on high timeframe, but only if SL is not at breakeven.
-- SL: Just beyond nearest 1m or 5m swing high/low (or min 1xATR)
+- SL: Just beyond nearest 5m or 15m swing high/low (or min 1xATR)
 - TP: At least 2xSL or next major S/R.
 
 EXAMPLES (JSON):
 {{
   "action": "buy",
-  "reason": "1m EMA over LWMA, 5m uptrend, MACD, ADX, and BB breakout. Three confluences: MACD rising, ADX>20, BB squeeze breakout.",
+  "reason": "5m EMA over LWMA, 15m uptrend, MACD, ADX, and BB breakout. Three confluences: MACD rising, ADX>20, BB squeeze breakout.",
   "confidence": 9,
   "lot": 2,
   "new_sl": 2301.5,
@@ -214,12 +213,12 @@ EXAMPLES (JSON):
 }}
 {{
   "action": "close",
-  "reason": "Reversal on 5m, confluence breakdown: MACD cross, ADX falling.",
+  "reason": "Reversal on 15m, confluence breakdown: MACD cross, ADX falling.",
   "confidence": 9
 }}
 {{
   "action": "hold",
-  "reason": "Hold, market is range-bound, MACD and RSI are flat, no clear confluence.",
+  "reason": "Hold, price action choppy and MACD/RSI are not aligned. Current indicators: MACD {ind_5m.macd}, RSI {ind_5m.rsi_array}, BB {ind_5m.bb_upper}/{ind_5m.bb_lower}.",
   "confidence": 2
 }}
 
@@ -228,10 +227,10 @@ Current Cross Meaning: {cross_meaning}
 Current Position: {pos.dict() if pos else "None"}
 Current Account: {acc.dict() if acc else "None"}
 SL: {getattr(pos, 'sl', None)} | Open: {getattr(pos, 'open_price', None)}
-Recent 1m Candles: {[candle.dict() for candle in candles_1m]}
-Indicators (1m): {ind_1m.dict()}
+Recent 5m Candles: {[candle.dict() for candle in candles_5m]}
 Indicators (5m): {ind_5m.dict()}
 Indicators (15m): {ind_15m.dict()}
+Indicators (1H): {ind_1h.dict()}
 """
 
     logging.info(f"\n========= SENDING PROMPT TO GPT =========\n{prompt}\n========================================\n")
@@ -300,4 +299,4 @@ Indicators (15m): {ind_15m.dict()}
 
 @app.get("/")
 async def root():
-    return {"message": "SmartGPT EA SCALPER - All Sessions, EMA/LWMA/SMMA confluence, 3-confluence filter, 1m/5m/15m logic, prop firm weekend safety, partial profits & BE handled by EA"}
+    return {"message": "SmartGPT EA SCALPER - All Sessions, EMA/LWMA/SMMA confluence, 3-confluence filter, 5m/15m/1H logic, prop firm weekend safety, partial profits & BE handled by EA"}
