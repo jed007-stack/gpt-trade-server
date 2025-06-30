@@ -162,20 +162,21 @@ async def gpt_manage(wrapper: TradeWrapper):
 
     # ========== GPT PROMPT ==========
     prompt = f"""
-You are a disciplined prop firm trading assistant.
+You are a decisive, disciplined prop firm trading assistant.
 
 - The EA HANDLES ALL partial profits and moves the stop loss (SL) to breakeven.
-- **IF THE STOP LOSS IS AT BREAKEVEN (SL == entry price), YOU MUST NOT SUGGEST OR MOVE THE SL.**
+- IF THE STOP LOSS IS AT BREAKEVEN (SL == entry price), YOU MUST NOT SUGGEST OR MOVE THE SL.
 - DO NOT open any new trades after 17:00 UK time on Friday. Only close or manage existing trades.
 - DO NOT open any new trades between 21:00 and 23:00 UK time.
 - ALWAYS try to close profitable trades before 22:00 UK time or before the weekend.
 - You CAN suggest a new take profit (TP) or a full close if necessary.
 - You MUST require at least 3 confluences for a new entry.
+- If at least three confluences are present and there is no direct conflict, you should generally favor taking the trade, unless there is a clear reversal or major uncertainty.
 - ONLY reply in VALID JSON using the example format.
 - If you are not certain, or if the entry rules are not met, reply:
   {{
     "action": "hold",
-    "reason": "Explain in detail why you are not taking a trade. Mention if the market is choppy, range-bound, unclear trend, indicators are not aligned, or if specific confluences are missing. Example: 'Hold, price action is choppy and MACD/RSI are not aligned.'",
+    "reason": "Explain in detail why you are not taking a trade. Mention if the market is choppy, range-bound, unclear trend, indicators are not aligned, or if specific confluences are missing.",
     "confidence": 2
   }}
 
@@ -259,7 +260,7 @@ Indicators (15m): {ind_15m.dict()}
         allowed = {"hold", "close", "trail_sl", "trail_tp", "buy", "sell"}
 
         conf = action.get("confidence", 0)
-        if action.get("action") in {"buy", "sell"} and conf < 7:
+        if action.get("action") in {"buy", "sell"} and conf < 6:
             action["action"] = "hold"
             action["reason"] = (action.get("reason") or "") + " (confidence too low for entry)"
         if action.get("action") in {"buy", "sell"} and "lot" not in action:
@@ -305,4 +306,4 @@ Indicators (15m): {ind_15m.dict()}
 
 @app.get("/")
 async def root():
-    return {"message": "SmartGPT EA SCALPER - All Sessions, EMA/LWMA/SMMA confluence, 3-confluence filter, 1m/5m/15m logic, prop firm weekend safety, partial profits & BE handled by EA"}
+    return {"message": "SmartGPT EA SCALPER - All Sessions, EMA/LWMA/SMMA confluence, 3-confluence filter, confidence 6+, 1m/5m/15m logic, prop firm weekend safety, partial profits & BE handled by EA"}
