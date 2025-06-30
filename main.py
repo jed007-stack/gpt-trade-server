@@ -162,23 +162,17 @@ async def gpt_manage(wrapper: TradeWrapper):
 
     # ========== GPT PROMPT ==========
     prompt = f"""
-You are a decisive, disciplined prop firm trading assistant.
+You are a disciplined prop firm trading assistant.
 
 - The EA HANDLES ALL partial profits and moves the stop loss (SL) to breakeven.
-- IF THE STOP LOSS IS AT BREAKEVEN (SL == entry price), YOU MUST NOT SUGGEST OR MOVE THE SL.
+- **IF THE STOP LOSS IS AT BREAKEVEN (SL == entry price), YOU MUST NOT SUGGEST OR MOVE THE SL.**
 - DO NOT open any new trades after 17:00 UK time on Friday. Only close or manage existing trades.
 - DO NOT open any new trades between 21:00 and 23:00 UK time.
 - ALWAYS try to close profitable trades before 22:00 UK time or before the weekend.
 - You CAN suggest a new take profit (TP) or a full close if necessary.
 - You MUST require at least 3 confluences for a new entry.
-- If at least three confluences are present and there is no direct conflict, you should generally favor taking the trade, unless there is a clear reversal or major uncertainty.
 - ONLY reply in VALID JSON using the example format.
-- If you are not certain, or if the entry rules are not met, reply:
-  {{
-    "action": "hold",
-    "reason": "Explain in detail why you are not taking a trade. Mention if the market is choppy, range-bound, unclear trend, indicators are not aligned, or if specific confluences are missing.",
-    "confidence": 2
-  }}
+- When replying "hold", ALWAYS explain the decision using actual, live indicator values or observations from the current context (price action, trend, indicator conflicts, market choppiness, etc). Never copy the instruction or use a template. Every "hold" must be a unique, context-specific explanation.
 
 IMPORTANT:
 - DO NOT move or suggest a new SL if the SL is already at breakeven.
@@ -212,7 +206,7 @@ SL/TP:
 EXAMPLES (JSON):
 {{
   "action": "buy",
-  "reason": "1m EMA over LWMA, 5m uptrend, MACD, ADX, and BB breakout. Three confluences, strong entry.",
+  "reason": "1m EMA over LWMA, 5m uptrend, MACD, ADX, and BB breakout. Three confluences: MACD rising, ADX>20, BB squeeze breakout.",
   "confidence": 9,
   "lot": 2,
   "new_sl": 2301.5,
@@ -220,13 +214,13 @@ EXAMPLES (JSON):
 }}
 {{
   "action": "close",
-  "reason": "Reversal on 5m, confluence breakdown.",
+  "reason": "Reversal on 5m, confluence breakdown: MACD cross, ADX falling.",
   "confidence": 9
 }}
 {{
   "action": "hold",
-  "reason": "Hold, market is range-bound and Stochastic/MACD are not aligned.",
-  "confidence": 3
+  "reason": "Hold, market is range-bound, MACD and RSI are flat, no clear confluence.",
+  "confidence": 2
 }}
 
 Current Cross Signal: {cross_signal}
@@ -250,7 +244,7 @@ Indicators (15m): {ind_15m.dict()}
                 {"role": "user", "content": prompt}
             ],
             max_tokens=350,
-            temperature=0.11,
+            temperature=0.15,
             response_format={"type": "json_object"}
         )
         decision = chat.choices[0].message.content.strip()
@@ -260,7 +254,7 @@ Indicators (15m): {ind_15m.dict()}
         allowed = {"hold", "close", "trail_sl", "trail_tp", "buy", "sell"}
 
         conf = action.get("confidence", 0)
-        if action.get("action") in {"buy", "sell"} and conf < 6:
+        if action.get("action") in {"buy", "sell"} and conf < 7:
             action["action"] = "hold"
             action["reason"] = (action.get("reason") or "") + " (confidence too low for entry)"
         if action.get("action") in {"buy", "sell"} and "lot" not in action:
@@ -306,4 +300,4 @@ Indicators (15m): {ind_15m.dict()}
 
 @app.get("/")
 async def root():
-    return {"message": "SmartGPT EA SCALPER - All Sessions, EMA/LWMA/SMMA confluence, 3-confluence filter, confidence 6+, 1m/5m/15m logic, prop firm weekend safety, partial profits & BE handled by EA"}
+    return {"message": "SmartGPT EA SCALPER - All Sessions, EMA/LWMA/SMMA confluence, 3-confluence filter, 1m/5m/15m logic, prop firm weekend safety, partial profits & BE handled by EA"}
