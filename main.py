@@ -19,8 +19,7 @@ openai_client = openai.OpenAI(api_key=api_key)
 app = FastAPI()
 logging.basicConfig(level=logging.INFO)
 
-# === Data Models (Match EA Payload) ===
-
+# === Data Models ===
 class MACD(BaseModel):
     main: Optional[float] = None
     signal: Optional[float] = None
@@ -82,14 +81,14 @@ class TradeData(BaseModel):
     update_type: Optional[str] = None
     cross_signal: Optional[str] = None
     cross_meaning: Optional[str] = None
-    indicators: Optional[Indicators] = None     # 5m
-    h1_indicators: Optional[Indicators] = None  # 15m
-    h4_indicators: Optional[Indicators] = None  # 1h
+    indicators: Optional[Indicators] = None
+    h1_indicators: Optional[Indicators] = None
+    h4_indicators: Optional[Indicators] = None
     position: Optional[Position] = None
     account: Optional[Account] = None
-    candles1: Optional[List[Candle]] = None     # 5m
-    candles2: Optional[List[Candle]] = None     # 15m
-    candles3: Optional[List[Candle]] = None     # 1h
+    candles1: Optional[List[Candle]] = None
+    candles2: Optional[List[Candle]] = None
+    candles3: Optional[List[Candle]] = None
     news_override: Optional[bool] = False
     live_candle1: Optional[Candle] = None
     live_candle2: Optional[Candle] = None
@@ -161,65 +160,54 @@ async def gpt_manage(wrapper: TradeWrapper):
     )
 
     prompt = f"""
-You are a decisive prop firm trading assistant.
+You are a decisive, disciplined prop firm trading assistant. DO NOT be lazy; always justify every action using live indicator values and current price context. NEVER copy or reuse generic phrases. Your job is to help avoid poor trades, especially counter-trend, and maximize edge.
 
-- The EA handles all partial profits and break-even moves.
-- **IF THE STOP LOSS IS AT BREAKEVEN (SL == entry price), YOU MUST NOT SUGGEST OR MOVE THE SL.**
-- DO NOT open any new trades after 17:00 UK time on Friday. Only close or manage existing trades.
-- DO NOT open any new trades between 21:00 and 23:00 UK time.
-- Always try to close profitable trades before 22:00 UK time or before the weekend.
-- You CAN suggest a new take profit (TP) or a full close if necessary.
-- Require at least 3 confluences for a new entry.
-- ONLY reply in VALID JSON using the example format.
-- When replying "hold", ALWAYS explain the decision using the live indicator values or actual price action context. NEVER copy a template; your reason should be unique and reflect the real market.
-
-IMPORTANT:
-- DO NOT move or suggest a new SL if the SL is already at breakeven.
-- DO NOT suggest new entries after 17:00 UK Friday or between 21:00 and 23:00 UK time.
-- Only take entries when 5m EMA/LWMA cross matches the trend of 15m or 1H and you have at least three confluences.
+CONFLUENCE LOGIC:
+- Never double-count similar indicators. Use these 6 unique confluence categories:
+    1. TREND: EMA/LWMA cross, Ichimoku cloud, **SMMA alignment and slope** (if SMMA matches trade direction, confidence increases; if SMMA is flat, turning, or sloping opposite, or if price is hugging/crossing SMMA, reduce confidence, warn of possible reversal, and DO NOT enter a trade against SMMA).
+    2. MOMENTUM: MACD, RSI, or Stochastic. (Only one counts.)
+    3. VOLATILITY: Bollinger Band breakout, ATR surge. (Only one counts.)
+    4. VOLUME: MFI extreme or volume spike. (Only one counts.)
+    5. STRUCTURE: Key support/resistance zone or Fibonacci alignment with reversal candle.
+    6. ADX: ADX > 20, DI+/DI- confirms trend.
 
 ENTRY RULES:
-- The latest cross_signal from the EA is: {cross_signal}
-- The latest cross_meaning from the EA is: {cross_meaning}
-- Only take trades if the 5m EMA/LWMA cross matches the trend of at least one higher timeframe (15m or 1H).
-- If you detect 3 or more of the following ("confluences") with no direct conflicts, issue a trade ("buy" or "sell"):
-  - MACD
-  - SMMA
-  - RSI or Stochastic
-  - ADX > 20
-  - Ichimoku agrees
-  - Bollinger Bands breakout or squeeze
-  - Candlestick reversal at a key level (S/R/fibonacci)
-- If ALL indicators align (5m, 15m, 1H), lot size should be 2. Otherwise, use 1.
+- Never recommend a trade if SMMA (slow MA) is trending opposite to the entry direction. If so, reply with "hold" and explain: "Trade direction conflicts with SMMA trend."
+- Only take a trade if at least 3 DIFFERENT categories align, with no direct conflicts.
+- If ALL 6 align (including strong SMMA confirmation), lot = 3. If 4-5, lot = 2. If 3, lot = 1.
+- If price is close to, hugging, or crossing SMMA, reduce confidence and consider holding or warning of possible trend reversal.
+- Always mention SMMA status for every signal and justify your confidence.
 
-EXIT/SCALP:
-- Do NOT suggest or move SL if SL is at breakeven (SL == entry price).
-- Suggest a new TP or a full close if a strong reversal/confluence break occurs.
-- Always try to close profitable trades before the weekend.
+RISK/SESSION GUARDS:
+- DO NOT move SL if SL is already at breakeven (SL == entry price).
+- DO NOT suggest or open new trades after 17:00 UK time Friday, or between 21:00-23:00 UK time.
+- Always try to close profitable trades before 22:00 UK or before the weekend.
+- EA handles all partial profit and break-even moves.
 
-SL/TP:
-- Always suggest new SL and TP based on high timeframe, but only if SL is not at breakeven.
-- SL: Just beyond nearest 5m or 15m swing high/low (or min 1xATR)
-- TP: At least 2xSL or next major S/R.
+SL/TP RULES:
+- SL: Just beyond last swing high/low or min 1xATR.
+- TP: At least 2xSL, or at next major SR/Fibonacci level.
 
-EXAMPLES (JSON):
+When replying, ALWAYS reference at least three unique indicator categories (not just momentum!), and ALWAYS mention SMMA status. DO NOT skip or be generic.
+
+EXAMPLES (JSON only, strictly follow this style):
 {{
   "action": "buy",
-  "reason": "5m EMA over LWMA, 15m uptrend, MACD, ADX, and BB breakout. Three confluences: MACD rising, ADX>20, BB squeeze breakout.",
+  "reason": "Trend, momentum, and volatility align: 5m EMA/LWMA cross up, MACD positive, BB squeeze breakout. SMMA is sloping up, confirming trend.",
   "confidence": 9,
   "lot": 2,
-  "new_sl": 2301.5,
-  "new_tp": 2310.0
-}}
-{{
-  "action": "close",
-  "reason": "Reversal on 15m, confluence breakdown: MACD cross, ADX falling.",
-  "confidence": 9
+  "new_sl": 2290,
+  "new_tp": 2310
 }}
 {{
   "action": "hold",
-  "reason": "Hold, price action choppy and MACD/RSI are not aligned. Current indicators: MACD {ind_5m.macd}, RSI {ind_5m.rsi_array}, BB {ind_5m.bb_upper}/{ind_5m.bb_lower}.",
+  "reason": "Sell signal detected but SMMA is sloping up, uptrend still intact, not entering against dominant trend. MACD and RSI also not confirming.",
   "confidence": 2
+}}
+{{
+  "action": "close",
+  "reason": "Trend reversal: SMMA has turned down and price crossed SMMA. 15m MACD down, price broke below Ichimoku cloud, major SR break.",
+  "confidence": 9
 }}
 
 Current Cross Signal: {cross_signal}
@@ -237,13 +225,13 @@ Indicators (1H): {ind_1h.dict()}
 
     try:
         chat = openai_client.chat.completions.create(
-            model="gpt-3.5-turbo",
+            model="gpt-4o",
             messages=[
                 {"role": "system", "content": "You are an elite, disciplined, risk-aware SCALPER trade assistant. Reply ONLY in valid JSON."},
                 {"role": "user", "content": prompt}
             ],
-            max_tokens=350,
-            temperature=0.15,
+            max_tokens=400,
+            temperature=0.12,
             response_format={"type": "json_object"}
         )
         decision = chat.choices[0].message.content.strip()
@@ -257,7 +245,7 @@ Indicators (1H): {ind_1h.dict()}
             action["action"] = "hold"
             action["reason"] = (action.get("reason") or "") + " (confidence too low for entry)"
         if action.get("action") in {"buy", "sell"} and "lot" not in action:
-            action["lot"] = 2 if "double" in (action.get("reason") or "").lower() or conf >= 9 else 1
+            action["lot"] = 2 if conf >= 9 else 1
 
         if "reason" not in action or not action["reason"]:
             action["reason"] = "No reasoning returned by GPT."
@@ -299,4 +287,4 @@ Indicators (1H): {ind_1h.dict()}
 
 @app.get("/")
 async def root():
-    return {"message": "SmartGPT EA SCALPER - All Sessions, EMA/LWMA/SMMA confluence, 3-confluence filter, 5m/15m/1H logic, prop firm weekend safety, partial profits & BE handled by EA"}
+    return {"message": "SmartGPT EA SCALPER - Multi-confluence, strict SMMA logic, NO counter-trend trades, no laziness, 5m/15m/1H confluence, session/prop safety."}
