@@ -180,15 +180,6 @@ async def gpt_manage(wrapper: TradeWrapper):
             "recovery_mode": in_recovery_mode
         })
 
-    logging.info(f"✅ {trade.symbol} | 5m Dir: {getattr(pos, 'direction', None)} | {getattr(pos, 'open_price', None)} → {getattr(pos, 'pnl', None)}")
-    logging.info(
-        f"📊 5m BB: ({ind_5m.bb_upper}, {ind_5m.bb_middle}, {ind_5m.bb_lower}) | "
-        f"Stoch: K={ind_5m.stoch_k}, D={ind_5m.stoch_d}, J={ind_5m.stoch_j} | "
-        f"MACD: {getattr(ind_5m.macd, 'main', None)}/{getattr(ind_5m.macd, 'signal', None)} | "
-        f"EMA: {ind_5m.ema} LWMA: {ind_5m.lwma} SMMA: {ind_5m.smma} | "
-        f"ADX: {ind_5m.adx} | MFI: {ind_5m.mfi} | WillR: {ind_5m.williams_r}"
-    )
-
     # ------- Add Recovery Mode Instruction to Prompt -------
     recovery_note = ""
     if in_recovery_mode:
@@ -203,6 +194,7 @@ async def gpt_manage(wrapper: TradeWrapper):
 
     prompt = f"""{recovery_note}
 You are a decisive, disciplined prop firm trading assistant. DO NOT be lazy; always justify every action using live indicator values and current price context. NEVER copy or reuse generic phrases.
+If you do not explicitly list at least {(4 if in_recovery_mode else 3)} unique categories (Trend, Momentum, Volatility, Volume, Structure, ADX) in your reason as in the example, your action will be set to 'hold' and the trade will not be taken. Never say just 'multiple confluences' or generic logic. List each category and which indicator fills it, every time.
 
 CONFLUENCE LOGIC:
 - There are **6 unique categories**: 
@@ -237,7 +229,7 @@ SL/TP RULES:
 - SL: Just beyond last swing high/low or min 1xATR.
 - TP: At least 2xSL, or at next major SR/Fibonacci level.
 
-When replying, ALWAYS reference at least three unique indicator categories (not just momentum!), and ALWAYS mention SMMA status. DO NOT skip or be generic.
+When replying, ALWAYS reference at least {(4 if in_recovery_mode else 3)} unique indicator categories (not just momentum!), and ALWAYS mention SMMA status. DO NOT skip or be generic.
 
 EXAMPLES (JSON only, strictly follow this style):
 {{
@@ -293,18 +285,17 @@ Indicators (1H): {ind_1h.dict()}
         cat_count = len(claimed)
         conf = action.get("confidence", 0)
 
+        # -- HARD anti-laziness check: must explicitly name confluences and have enough --
+        if ("confluences:" not in action.get("reason", "").lower()) or (cat_count < (4 if in_recovery_mode else 3)):
+            action["action"] = "hold"
+            action["reason"] += f" | GPT did not properly explain confluences or unique categories ({cat_count} found)."
+
         if in_recovery_mode:
-            if action.get("action") in {"buy", "sell"} and cat_count < 4:
-                action["action"] = "hold"
-                action["reason"] += f" | Recovery mode: Fewer than 4 unique confluence categories specified ({cat_count} found)."
-            elif action.get("action") in {"buy", "sell"} and conf < 8:
+            if action.get("action") in {"buy", "sell"} and conf < 8:
                 action["action"] = "hold"
                 action["reason"] += " | Recovery mode: Not enough confluence/confidence for recovery entry."
         else:
-            if action.get("action") in {"buy", "sell"} and cat_count < 3:
-                action["action"] = "hold"
-                action["reason"] += f" | Fewer than 3 unique confluence categories specified ({cat_count} found)."
-            elif action.get("action") in {"buy", "sell"} and conf < 7:
+            if action.get("action") in {"buy", "sell"} and conf < 7:
                 action["action"] = "hold"
                 action["reason"] += " (confidence too low for entry)"
 
