@@ -92,6 +92,8 @@ class TradeData(BaseModel):
     news_override: Optional[bool] = False
     live_candle1: Optional[Candle] = None
     live_candle2: Optional[Candle] = None
+    last_trade_was_loss: Optional[bool] = False
+    unrecovered_loss: Optional[float] = 0.0
 
 class TradeWrapper(BaseModel):
     data: TradeData
@@ -130,6 +132,17 @@ def is_friday_5pm_or_later():
     now = uk_time_now()
     return now.weekday() == 4 and now.time() >= time(17, 0)
 
+def extract_categories(reason):
+    m = re.search(r"Confluences?:\s*([^.]+)", reason, re.IGNORECASE)
+    if not m:
+        return set()
+    cats = m.group(1)
+    found = set()
+    for cat in ["Trend", "Momentum", "Volatility", "Volume", "Structure", "ADX"]:
+        if re.search(r"\b{}\b".format(cat), cats, re.IGNORECASE):
+            found.add(cat.lower())
+    return found
+
 @app.post("/gpt/manage")
 async def gpt_manage(wrapper: TradeWrapper):
     trade = wrapper.data
@@ -144,11 +157,28 @@ async def gpt_manage(wrapper: TradeWrapper):
     cross_signal = trade.cross_signal or "none"
     cross_meaning = trade.cross_meaning or "none"
 
-    logging.info(f"🔻 RAW PAYLOAD:\n{wrapper.json()}\n---")
+    # -------- Recovery Mode Logic --------
+    in_recovery_mode = False
+    unrecovered_loss = 0.0
+    try:
+        unrecovered_loss = float(getattr(trade, "unrecovered_loss", 0.0) or 0.0)
+    except Exception:
+        unrecovered_loss = 0.0
+    if getattr(trade, "last_trade_was_loss", False):
+        in_recovery_mode = True
+    if unrecovered_loss > 0.0:
+        in_recovery_mode = True
 
+    logging.info(f"🔻 RAW PAYLOAD:\n{wrapper.json()}\n---")
     if trade.news_override:
         logging.warning("🛑 News conflict detected. GPT override active.")
-        return JSONResponse(content={"action": "hold", "reason": "News conflict — override active", "confidence": 0})
+        return JSONResponse(content={
+            "action": "hold",
+            "reason": "News conflict — override active",
+            "confidence": 0,
+            "categories": [],
+            "recovery_mode": in_recovery_mode
+        })
 
     logging.info(f"✅ {trade.symbol} | 5m Dir: {getattr(pos, 'direction', None)} | {getattr(pos, 'open_price', None)} → {getattr(pos, 'pnl', None)}")
     logging.info(
@@ -159,21 +189,40 @@ async def gpt_manage(wrapper: TradeWrapper):
         f"ADX: {ind_5m.adx} | MFI: {ind_5m.mfi} | WillR: {ind_5m.williams_r}"
     )
 
-    prompt = f"""
-You are a decisive, disciplined prop firm trading assistant. DO NOT be lazy; always justify every action using live indicator values and current price context. NEVER copy or reuse generic phrases. Your job is to help avoid poor trades, especially counter-trend, and maximize edge.
+    # ------- Add Recovery Mode Instruction to Prompt -------
+    recovery_note = ""
+    if in_recovery_mode:
+        recovery_note = (
+            "\n---\n"
+            "RECOVERY MODE: The last trade was a loss and has not yet been recovered. "
+            "You must only recommend a trade if at least **4 out of 6 unique confluence categories** align and overall confidence is 8 or higher. "
+            "You must *explicitly state which categories* are satisfied, and only one indicator per category is allowed (see below). "
+            "If fewer than 4 unique categories are satisfied, hold. Justify recovery trades with extra strictness, and reference recovery mode in your reason."
+            "\n---\n"
+        )
+
+    prompt = f"""{recovery_note}
+You are a decisive, disciplined prop firm trading assistant. DO NOT be lazy; always justify every action using live indicator values and current price context. NEVER copy or reuse generic phrases.
 
 CONFLUENCE LOGIC:
-- Never double-count similar indicators. Use these 6 unique confluence categories:
-    1. TREND: EMA/LWMA cross, Ichimoku cloud, **SMMA alignment and slope** (if SMMA matches trade direction, confidence increases; if SMMA is flat, turning, or sloping opposite, or if price is hugging/crossing SMMA, reduce confidence, warn of possible reversal, and DO NOT enter a trade against SMMA).
-    2. MOMENTUM: MACD, RSI, or Stochastic. (Only one counts.)
-    3. VOLATILITY: Bollinger Band breakout, ATR surge. (Only one counts.)
-    4. VOLUME: MFI extreme or volume spike. (Only one counts.)
-    5. STRUCTURE: Key support/resistance zone or Fibonacci alignment with reversal candle.
-    6. ADX: ADX > 20, DI+/DI- confirms trend.
+- There are **6 unique categories**: 
+  1. TREND: (choose one, e.g. EMA/LWMA cross OR Ichimoku OR SMMA—but only one counts as Trend)
+  2. MOMENTUM: (MACD OR RSI OR Stochastic—only one counts as Momentum)
+  3. VOLATILITY: (Bollinger Bands OR ATR—only one counts as Volatility)
+  4. VOLUME: (MFI OR volume spike—only one counts as Volume)
+  5. STRUCTURE: (Key support/resistance OR Fibonacci alignment OR reversal candle—only one counts as Structure)
+  6. ADX: (ADX > 20 and direction—only one counts as ADX)
+- When justifying an entry, you **must explicitly state which categories are satisfied**, e.g.: 
+  `Confluences: Trend (EMA cross), Momentum (MACD), Volatility (BB), Structure (Fib), ADX (trend > 20).`
+- **Only one indicator per category can count towards the confluence total.**
+- If more than one indicator in the same category aligns, only count the strongest or most significant.
+- When replying, provide a line listing the *categories* being counted. Do not “double-count” indicators in the same category.
+- Do NOT claim more than 6 confluences; do not count two momentum or two trend indicators as separate.
 
 ENTRY RULES:
 - Never recommend a trade if SMMA (slow MA) is trending opposite to the entry direction. If so, reply with "hold" and explain: "Trade direction conflicts with SMMA trend."
-- Only take a trade if at least 3 DIFFERENT categories align, with no direct conflicts.
+- Only take a trade if at least 3 different categories align (not just indicators).
+- In recovery mode, at least 4 out of 6 categories must align, per above.
 - If ALL 6 align (including strong SMMA confirmation), lot = 3. If 4-5, lot = 2. If 3, lot = 1.
 - If price is close to, hugging, or crossing SMMA, reduce confidence and consider holding or warning of possible trend reversal.
 - Always mention SMMA status for every signal and justify your confidence.
@@ -193,7 +242,7 @@ When replying, ALWAYS reference at least three unique indicator categories (not 
 EXAMPLES (JSON only, strictly follow this style):
 {{
   "action": "buy",
-  "reason": "Trend, momentum, and volatility align: 5m EMA/LWMA cross up, MACD positive, BB squeeze breakout. SMMA is sloping up, confirming trend.",
+  "reason": "Confluences: Trend (EMA/LWMA cross up), Momentum (MACD positive), Volatility (BB squeeze breakout). SMMA is sloping up, confirming trend.",
   "confidence": 9,
   "lot": 2,
   "new_sl": 2290,
@@ -201,12 +250,12 @@ EXAMPLES (JSON only, strictly follow this style):
 }}
 {{
   "action": "hold",
-  "reason": "Sell signal detected but SMMA is sloping up, uptrend still intact, not entering against dominant trend. MACD and RSI also not confirming.",
+  "reason": "Confluences: Trend (EMA cross down). Sell signal detected but SMMA is sloping up, uptrend still intact, not entering against dominant trend. MACD and RSI also not confirming.",
   "confidence": 2
 }}
 {{
   "action": "close",
-  "reason": "Trend reversal: SMMA has turned down and price crossed SMMA. 15m MACD down, price broke below Ichimoku cloud, major SR break.",
+  "reason": "Confluences: Trend (SMMA turning down), Momentum (MACD), Structure (support break). Trend reversal: SMMA has turned down and price crossed SMMA. 15m MACD down, price broke below Ichimoku cloud, major SR break.",
   "confidence": 9
 }}
 
@@ -240,10 +289,25 @@ Indicators (1H): {ind_1h.dict()}
         action = flatten_action(decision)
         allowed = {"hold", "close", "trail_sl", "trail_tp", "buy", "sell"}
 
+        claimed = extract_categories(action.get("reason", ""))
+        cat_count = len(claimed)
         conf = action.get("confidence", 0)
-        if action.get("action") in {"buy", "sell"} and conf < 7:
-            action["action"] = "hold"
-            action["reason"] = (action.get("reason") or "") + " (confidence too low for entry)"
+
+        if in_recovery_mode:
+            if action.get("action") in {"buy", "sell"} and cat_count < 4:
+                action["action"] = "hold"
+                action["reason"] += f" | Recovery mode: Fewer than 4 unique confluence categories specified ({cat_count} found)."
+            elif action.get("action") in {"buy", "sell"} and conf < 8:
+                action["action"] = "hold"
+                action["reason"] += " | Recovery mode: Not enough confluence/confidence for recovery entry."
+        else:
+            if action.get("action") in {"buy", "sell"} and cat_count < 3:
+                action["action"] = "hold"
+                action["reason"] += f" | Fewer than 3 unique confluence categories specified ({cat_count} found)."
+            elif action.get("action") in {"buy", "sell"} and conf < 7:
+                action["action"] = "hold"
+                action["reason"] += " (confidence too low for entry)"
+
         if action.get("action") in {"buy", "sell"} and "lot" not in action:
             action["lot"] = 2 if conf >= 9 else 1
 
@@ -275,16 +339,26 @@ Indicators (1H): {ind_1h.dict()}
                 action["action"] = "close"
                 action["reason"] += " | Closing profitable trade before 22:00 UK to avoid spread widening."
 
-        logging.info(f"📝 GPT Action: {action.get('action')} | Lot: {action.get('lot', 1)} | Confidence: {action.get('confidence', 0)} | Reason: {action.get('reason','(none)')}")
+        # --- ALWAYS return categories and recovery_mode for chart label/debug ---
+        action["categories"] = sorted(list(claimed))
+        action["recovery_mode"] = in_recovery_mode
+
+        logging.info(f"📝 GPT Action: {action.get('action')} | Lot: {action.get('lot', 1)} | Confidence: {action.get('confidence', 0)} | Reason: {action.get('reason','(none)')} | Categories: {action['categories']} | Recovery: {action['recovery_mode']}")
         if action.get("action") in allowed:
             return JSONResponse(content=action)
         else:
-            return JSONResponse(content={"action": "hold", "reason": f"Could not decode: {decision}", "confidence": 0})
+            return JSONResponse(content=action)  # Always includes debug fields!
 
     except Exception as e:
         logging.error(f"❌ GPT Error: {str(e)}")
-        return JSONResponse(content={"action": "hold", "reason": str(e), "confidence": 0})
+        return JSONResponse(content={
+            "action": "hold",
+            "reason": str(e),
+            "confidence": 0,
+            "categories": [],
+            "recovery_mode": in_recovery_mode
+        })
 
 @app.get("/")
 async def root():
-    return {"message": "SmartGPT EA SCALPER - Multi-confluence, strict SMMA logic, NO counter-trend trades, no laziness, 5m/15m/1H confluence, session/prop safety."}
+    return {"message": "SmartGPT EA SCALPER - Multi-confluence, strict SMMA logic, category-checked confluence, prop/session safety, E8 loss recovery, and visual debug for EA."}
