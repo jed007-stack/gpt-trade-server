@@ -193,8 +193,7 @@ async def gpt_manage(wrapper: TradeWrapper):
         )
 
     prompt = f"""{recovery_note}
-You are a decisive, disciplined prop firm trading assistant. DO NOT be lazy; always justify every action using live indicator values and current price context. NEVER copy or reuse generic phrases.
-If you do not explicitly list at least {(4 if in_recovery_mode else 3)} unique categories (Trend, Momentum, Volatility, Volume, Structure, ADX) in your reason as in the example, your action will be set to 'hold' and the trade will not be taken. Never say just 'multiple confluences' or generic logic. List each category and which indicator fills it, every time.
+You are a decisive, disciplined prop firm trading assistant. DO NOT be lazy or generic; always justify every action using live indicator values and current price context. NEVER reuse generic logic. If you do not explicitly list at least {(4 if in_recovery_mode else 3)} unique categories (Trend, Momentum, Volatility, Volume, Structure, ADX) in your reason as in the example, your action will be set to 'hold' and the trade will not be taken. Never say just 'multiple confluences' or generic logic. List each category and which indicator fills it, every time.
 
 CONFLUENCE LOGIC:
 - There are **6 unique categories**: 
@@ -266,15 +265,15 @@ Indicators (1H): {ind_1h.dict()}
 
     try:
         chat = openai_client.chat.completions.create(
-            model="gpt-4o",
+            model="gpt-3.5-turbo",
             messages=[
                 {"role": "system", "content": "You are an elite, disciplined, risk-aware SCALPER trade assistant. Reply ONLY in valid JSON."},
                 {"role": "user", "content": prompt}
             ],
             max_tokens=400,
             temperature=0.12,
-            response_format={"type": "json_object"}
         )
+        # 3.5 doesn't support response_format
         decision = chat.choices[0].message.content.strip()
         logging.info(f"🎯 GPT Decision (raw): {decision}")
 
@@ -352,4 +351,4 @@ Indicators (1H): {ind_1h.dict()}
 
 @app.get("/")
 async def root():
-    return {"message": "SmartGPT EA SCALPER - Multi-confluence, strict SMMA logic, category-checked confluence, prop/session safety, E8 loss recovery, and visual debug for EA."}
+    return {"message": "SmartGPT EA SCALPER (3.5-turbo) - Multi-confluence, strict SMMA logic, category-checked confluence, prop/session safety, E8 loss recovery, and visual debug for EA."}
