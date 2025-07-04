@@ -180,7 +180,6 @@ async def gpt_manage(wrapper: TradeWrapper):
             "recovery_mode": in_recovery_mode
         })
 
-    # ------- Add Recovery Mode Instruction to Prompt -------
     recovery_note = ""
     if in_recovery_mode:
         recovery_note = (
@@ -193,7 +192,9 @@ async def gpt_manage(wrapper: TradeWrapper):
         )
 
     prompt = f"""{recovery_note}
-You are a decisive, disciplined prop firm trading assistant. DO NOT be lazy or generic; always justify every action using live indicator values and current price context. NEVER reuse generic logic. If you do not explicitly list at least {(4 if in_recovery_mode else 3)} unique categories (Trend, Momentum, Volatility, Volume, Structure, ADX) in your reason as in the example, your action will be set to 'hold' and the trade will not be taken. Never say just 'multiple confluences' or generic logic. List each category and which indicator fills it, every time.
+You are a decisive, disciplined prop firm trading assistant. DO NOT be lazy or generic; always justify every action using live indicator values and current price context. NEVER reuse generic logic.
+If you do not explicitly list at least {(4 if in_recovery_mode else 3)} unique categories (Trend, Momentum, Volatility, Volume, Structure, ADX) in your reason as in the example, your action will be set to 'hold' and the trade will not be taken.
+Never say just 'multiple confluences' or generic logic. List each category and which indicator fills it, every time.
 
 CONFLUENCE LOGIC:
 - There are **6 unique categories**: 
@@ -212,7 +213,7 @@ CONFLUENCE LOGIC:
 
 ENTRY RULES:
 - Never recommend a trade if SMMA (slow MA) is trending opposite to the entry direction. If so, reply with "hold" and explain: "Trade direction conflicts with SMMA trend."
-- Only take a trade if at least 3 different categories align (not just indicators).
+- Only take a trade if at least {(4 if in_recovery_mode else 3)} different categories align (not just indicators).
 - In recovery mode, at least 4 out of 6 categories must align, per above.
 - If ALL 6 align (including strong SMMA confirmation), lot = 3. If 4-5, lot = 2. If 3, lot = 1.
 - If price is close to, hugging, or crossing SMMA, reduce confidence and consider holding or warning of possible trend reversal.
@@ -267,13 +268,12 @@ Indicators (1H): {ind_1h.dict()}
         chat = openai_client.chat.completions.create(
             model="gpt-3.5-turbo",
             messages=[
-                {"role": "system", "content": "You are an elite, disciplined, risk-aware SCALPER trade assistant. Reply ONLY in valid JSON."},
+                {"role": "system", "content": "You are an elite, disciplined, risk-aware SCALPER trade assistant. Reply ONLY in valid JSON. Fill all fields. For every buy or sell, always suggest new_sl and new_tp."},
                 {"role": "user", "content": prompt}
             ],
             max_tokens=400,
-            temperature=0.12,
+            temperature=0.12
         )
-        # 3.5 doesn't support response_format
         decision = chat.choices[0].message.content.strip()
         logging.info(f"🎯 GPT Decision (raw): {decision}")
 
@@ -284,7 +284,7 @@ Indicators (1H): {ind_1h.dict()}
         cat_count = len(claimed)
         conf = action.get("confidence", 0)
 
-        # -- HARD anti-laziness check: must explicitly name confluences and have enough --
+        # HARD anti-lazy: must have confluences and enough
         if ("confluences:" not in action.get("reason", "").lower()) or (cat_count < (4 if in_recovery_mode else 3)):
             action["action"] = "hold"
             action["reason"] += f" | GPT did not properly explain confluences or unique categories ({cat_count} found)."
@@ -304,14 +304,14 @@ Indicators (1H): {ind_1h.dict()}
         if "reason" not in action or not action["reason"]:
             action["reason"] = "No reasoning returned by GPT."
 
-        # === SL Breakeven Guard ===
+        # SL Breakeven Guard
         if pos and pos.open_price and pos.sl is not None:
             if abs(pos.sl - pos.open_price) < 1e-5:
                 if "new_sl" in action and action["new_sl"] != pos.sl:
                     action["reason"] += " | SL at breakeven, not allowed to move."
                     action["new_sl"] = pos.sl
 
-        # === FRIDAY 5PM+ GUARD: No new trades after 17:00 Friday, close profits ===
+        # Friday/weekend/session guards
         if is_friday_5pm_or_later():
             if pos and pos.pnl and pos.pnl > 0 and action.get("action") not in {"close", "hold"}:
                 action["action"] = "close"
@@ -320,16 +320,14 @@ Indicators (1H): {ind_1h.dict()}
                 action["action"] = "hold"
                 action["reason"] += " | No new trades after 17:00 UK time Friday (weekend risk)."
 
-        # === TIME GUARD: Block new entries after 21:00, force closing profits before 22:00 ===
         if pos and pos.pnl and acc:
             if is_between_uk_time(21, 23) and action.get("action") in {"buy", "sell"}:
                 action["action"] = "hold"
                 action["reason"] += " | No new trades between 21:00 and 23:00 UK time."
             if is_between_uk_time(21, 22) and pos.pnl > 0 and action.get("action") not in {"close", "hold"}:
                 action["action"] = "close"
-                action["reason"] += " | Closing profitable trade before 22:00 UK to avoid spread widening."
+                action["reason"] += " | Closing profitable trade before 22:00 UK."
 
-        # --- ALWAYS return categories and recovery_mode for chart label/debug ---
         action["categories"] = sorted(list(claimed))
         action["recovery_mode"] = in_recovery_mode
 
@@ -337,7 +335,7 @@ Indicators (1H): {ind_1h.dict()}
         if action.get("action") in allowed:
             return JSONResponse(content=action)
         else:
-            return JSONResponse(content=action)  # Always includes debug fields!
+            return JSONResponse(content=action)
 
     except Exception as e:
         logging.error(f"❌ GPT Error: {str(e)}")
@@ -351,4 +349,4 @@ Indicators (1H): {ind_1h.dict()}
 
 @app.get("/")
 async def root():
-    return {"message": "SmartGPT EA SCALPER (3.5-turbo) - Multi-confluence, strict SMMA logic, category-checked confluence, prop/session safety, E8 loss recovery, and visual debug for EA."}
+    return {"message": "SmartGPT EA SCALPER (3.5-turbo, full/verbose) - Multi-confluence, strict SMMA, strict category-checked confluence, strict SL/TP suggestion, prop/session safety, E8 loss recovery, anti-lazy JSON enforcement."}
