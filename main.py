@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+om fastapi import FastAPI
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 from fastapi.responses import JSONResponse
@@ -289,6 +289,13 @@ Indicators (1H): {ind_1h.dict()}
             action["action"] = "hold"
             action["reason"] += f" | GPT did not properly explain confluences or unique categories ({cat_count} found)."
 
+        # ENFORCE SL/TP suggestions on all entries
+        if action.get("action") in {"buy", "sell"}:
+            if "new_sl" not in action or "new_tp" not in action:
+                action["action"] = "hold"
+                action["reason"] += " | GPT did not return both new_sl and new_tp for this trade."
+
+        # ENFORCE confidence threshold
         if in_recovery_mode:
             if action.get("action") in {"buy", "sell"} and conf < 8:
                 action["action"] = "hold"
@@ -345,8 +352,11 @@ Indicators (1H): {ind_1h.dict()}
             "confidence": 0,
             "categories": [],
             "recovery_mode": in_recovery_mode
+
         })
 
 @app.get("/")
 async def root():
-    return {"message": "SmartGPT EA SCALPER (3.5-turbo, full/verbose) - Multi-confluence, strict SMMA, strict category-checked confluence, strict SL/TP suggestion, prop/session safety, E8 loss recovery, anti-lazy JSON enforcement."}
+    return {
+        "message": "SmartGPT EA SCALPER (GPT-3.5-turbo, ultra-strict, multi-confluence, strict SMMA, strict category-checked confluence, strict SL/TP suggestion, prop/session safety, E8 loss recovery, anti-lazy JSON enforcement)."
+    }
