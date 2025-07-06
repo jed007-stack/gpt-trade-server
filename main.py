@@ -1,4 +1,4 @@
-om fastapi import FastAPI
+from fastapi import FastAPI
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 from fastapi.responses import JSONResponse
@@ -352,7 +352,6 @@ Indicators (1H): {ind_1h.dict()}
             "confidence": 0,
             "categories": [],
             "recovery_mode": in_recovery_mode
-
         })
 
 @app.get("/")
