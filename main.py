@@ -274,13 +274,13 @@ Indicators (1H): {ind_1h.dict()}
 
     try:
         chat = openai_client.chat.completions.create(
-            model="gpt-3.5-turbo",
+            model="gpt-4o",
             messages=[
                 {"role": "system", "content": "You are an elite, disciplined, risk-aware SCALPER trade assistant. Reply ONLY in valid JSON. Fill all fields. For every buy or sell, always suggest new_sl and new_tp."},
                 {"role": "user", "content": prompt}
             ],
-            max_tokens=400,
-            temperature=0.12
+            max_tokens=600,
+            temperature=0.13
         )
         decision = chat.choices[0].message.content.strip()
         logging.info(f"🎯 GPT Decision (raw): {decision}")
@@ -365,5 +365,5 @@ Indicators (1H): {ind_1h.dict()}
 @app.get("/")
 async def root():
     return {
-        "message": "SmartGPT EA SCALPER (GPT-3.5-turbo, ultra-strict, multi-confluence, strict SMMA, strict category-checked confluence, strict SL/TP suggestion, prop/session safety, E8 loss recovery, anti-lazy JSON enforcement, and strict confluence explanations on every response)."
+        "message": "SmartGPT EA SCALPER (GPT-4o, ultra-strict, multi-confluence, strict SMMA, strict category-checked confluence, strict SL/TP suggestion, prop/session safety, E8 loss recovery, anti-lazy JSON enforcement, and strict confluence explanations on every response)."
     }
