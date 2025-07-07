@@ -155,35 +155,53 @@ def get_smma_direction(smma_array: Optional[List[float]]) -> Optional[str]:
             return "flat"
     return None
 
-def smma_trend_check(trade: TradeData, action: str) -> (bool, str):
+# === Multi-TF SMMA Enforcement ===
+def smma_trend_check_multi(trade: TradeData, action: str) -> (bool, str, int):
     """
-    Checks if SMMA trend agrees with trade direction on main and higher timeframes.
-    Returns (True, "") if good. If not, returns (False, error message)
+    Enforces: Main timeframe SMMA and at least one higher timeframe SMMA (M15 or H1) must agree with direction.
+    Returns (allowed: bool, message: str, confidence_boost: int)
     """
-    msg = ""
     tf_names = ['Main', 'H1', 'H4']
-    tfs = [
-        trade.indicators,
-        trade.h1_indicators,
-        trade.h4_indicators
-    ]
+    tfs = [trade.indicators, trade.h1_indicators, trade.h4_indicators]
     trends = []
     for tf, name in zip(tfs, tf_names):
-        if tf and tf.smma_array is not None and len(tf.smma_array) >= 2:
+        if tf and tf.smma_array and len(tf.smma_array) >= 2:
             trend = get_smma_direction(tf.smma_array)
             trends.append((name, trend, tf.smma_array))
         else:
             trends.append((name, None, tf.smma_array))
-    main_tf_trend = trends[0][1]
-    if action == "buy":
-        if main_tf_trend != "up":
-            msg = f"Trade direction is BUY but main timeframe SMMA is {main_tf_trend.upper() if main_tf_trend else 'UNKNOWN'} (values: {trends[0][2]})."
-            return False, msg
-    elif action == "sell":
-        if main_tf_trend != "down":
-            msg = f"Trade direction is SELL but main timeframe SMMA is {main_tf_trend.upper() if main_tf_trend else 'UNKNOWN'} (values: {trends[0][2]})."
-            return False, msg
-    return True, ""
+
+    main_trend = trends[0][1]
+    h1_trend = trends[1][1]
+    h4_trend = trends[2][1]
+    trend_dir = {"buy": "up", "sell": "down"}
+
+    required = trend_dir.get(action, None)
+    allowed = False
+    message = ""
+    confidence_boost = 0
+
+    agree_count = 0
+
+    # Main must agree
+    if main_trend == required:
+        # At least one higher TF must also agree
+        if h1_trend == required or h4_trend == required:
+            allowed = True
+            agree_count = 2
+            if h1_trend == required and h4_trend == required:
+                agree_count = 3
+                confidence_boost = 1
+        else:
+            message = (f"Trade direction is {action.upper()} and main SMMA is {main_trend.upper()}, "
+                       f"but neither H1 nor H4 SMMA agrees (H1: {h1_trend}, H4: {h4_trend}).")
+            allowed = False
+    else:
+        message = (f"Trade direction is {action.upper()} but main SMMA is {main_trend.upper() if main_trend else 'UNKNOWN'} "
+                   f"(values: {trends[0][2]}).")
+        allowed = False
+
+    return allowed, message, confidence_boost
 
 @app.post("/gpt/manage")
 async def gpt_manage(wrapper: TradeWrapper):
@@ -255,10 +273,10 @@ CONFLUENCE LOGIC:
 - Do NOT claim more than 6 confluences; do not count two momentum or two trend indicators as separate.
 
 ENTRY RULES:
-- Never recommend a trade if SMMA (slow MA) is trending opposite to the entry direction. If so, reply with "hold" and explain: "Trade direction conflicts with SMMA trend."
+- Never recommend a trade if SMMA (slow MA) is trending opposite to the entry direction on main timeframe AND at least one higher timeframe. If so, reply with "hold" and explain: "Trade direction conflicts with SMMA trend."
 - Only take a trade if at least {(4 if in_recovery_mode else 3)} different categories align (not just indicators).
 - In recovery mode, at least 4 out of 6 categories must align, per above.
-- If ALL 6 align (including strong SMMA confirmation), lot = 3. If 4-5, lot = 2. If 3, lot = 1.
+- If ALL 3 (main, H1, H4) agree (strongest trend), add +1 confidence to the decision.
 - If price is close to, hugging, or crossing SMMA, reduce confidence and consider holding or warning of possible trend reversal.
 - Always mention SMMA status for every signal and justify your confidence.
 
@@ -334,13 +352,6 @@ Indicators (1H): {ind_1h.dict()}
         cat_count = len(claimed)
         conf = action.get("confidence", 0)
 
-        # --- SMMA DIRECTION ENFORCEMENT ---
-        if action.get("action") in {"buy", "sell"}:
-            ok, msg = smma_trend_check(trade, action.get("action"))
-            if not ok:
-                action["action"] = "hold"
-                action["reason"] = (action.get("reason", "") + f" | {msg} (SMMA direction enforcement)").strip()
-
         # HARD anti-lazy: must have confluences and enough
         if ("confluences:" not in action.get("reason", "").lower()) or (cat_count < (4 if in_recovery_mode else 3)):
             action["action"] = "hold"
@@ -374,6 +385,16 @@ Indicators (1H): {ind_1h.dict()}
                 if "new_sl" in action and action["new_sl"] != pos.sl:
                     action["reason"] += " | SL at breakeven, not allowed to move."
                     action["new_sl"] = pos.sl
+
+        # === MULTI-TF SMMA ENFORCEMENT ===
+        if action.get("action") in {"buy", "sell"}:
+            ok, msg, conf_boost = smma_trend_check_multi(trade, action.get("action"))
+            if not ok:
+                action["action"] = "hold"
+                action["reason"] = (action.get("reason", "") + f" | {msg} (SMMA multi-timeframe direction enforcement)").strip()
+            elif conf_boost:
+                action["confidence"] = int(action.get("confidence", 0)) + conf_boost
+                action["reason"] = (action.get("reason", "") + f" | All SMMA trends agree: main, H1, and H4. Confidence boosted by {conf_boost}.").strip()
 
         # Friday/weekend/session guards
         if is_friday_5pm_or_later():
@@ -414,5 +435,5 @@ Indicators (1H): {ind_1h.dict()}
 @app.get("/")
 async def root():
     return {
-        "message": "SmartGPT EA SCALPER (GPT-4o, ultra-strict, multi-confluence, strict SMMA, strict category-checked confluence, strict SL/TP suggestion, prop/session safety, E8 loss recovery, anti-lazy JSON enforcement, and strict confluence explanations on every response)."
+        "message": "SmartGPT EA SCALPER (GPT-4o, ultra-strict, multi-confluence, strict SMMA enforcement, multi-timeframe agreement required, category-checked confluence, strict SL/TP suggestion, prop/session safety, E8 loss recovery, anti-lazy JSON enforcement, and strict confluence explanations on every response)."
     }
