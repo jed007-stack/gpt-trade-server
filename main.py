@@ -191,6 +191,7 @@ async def gpt_manage(wrapper: TradeWrapper):
             "\n---\n"
         )
 
+    # === NEW STRICT PROMPT ===
     prompt = f"""{recovery_note}
 You are a decisive, disciplined prop firm trading assistant. DO NOT be lazy or generic; always justify every action using live indicator values and current price context. NEVER reuse generic logic.
 If you do not explicitly list at least {(4 if in_recovery_mode else 3)} unique categories (Trend, Momentum, Volatility, Volume, Structure, ADX) in your reason as in the example, your action will be set to 'hold' and the trade will not be taken.
@@ -229,12 +230,19 @@ SL/TP RULES:
 - SL: Just beyond last swing high/low or min 1xATR.
 - TP: At least 2xSL, or at next major SR/Fibonacci level.
 
-When replying, ALWAYS reference at least {(4 if in_recovery_mode else 3)} unique indicator categories (not just momentum!), and ALWAYS mention SMMA status. DO NOT skip or be generic.
+**NEW STRICT CONFLUENCE REQUIREMENT:**  
+For EVERY response, including "hold" and "close", you must ALWAYS include a full 'Confluences:' line.  
+- List every category (Trend, Momentum, Volatility, Volume, Structure, ADX).  
+- For each, state the present indicator, value, and if it confirms, is neutral, or conflicts.  
+- Example (hold):  
+  Confluences: Trend (conflict with SMMA), Momentum (MACD positive), Volatility (neutral), Volume (low), Structure (neutral), ADX (weak).  
+- After the confluences line, clearly explain why action is "hold" (e.g. "Trade direction conflicts with SMMA trend and not enough categories align.")  
+- **Never skip the confluences line, even for "hold" or session filter.**
 
 EXAMPLES (JSON only, strictly follow this style):
 {{
   "action": "buy",
-  "reason": "Confluences: Trend (EMA/LWMA cross up), Momentum (MACD positive), Volatility (BB squeeze breakout). SMMA is sloping up, confirming trend.",
+  "reason": "Confluences: Trend (EMA/LWMA cross up), Momentum (MACD positive), Volatility (BB squeeze breakout), Volume (MFI strong), Structure (Fibonacci support), ADX (trend > 20). SMMA is sloping up, confirming trend.",
   "confidence": 9,
   "lot": 2,
   "new_sl": 2290,
@@ -242,12 +250,12 @@ EXAMPLES (JSON only, strictly follow this style):
 }}
 {{
   "action": "hold",
-  "reason": "Confluences: Trend (EMA cross down). Sell signal detected but SMMA is sloping up, uptrend still intact, not entering against dominant trend. MACD and RSI also not confirming.",
+  "reason": "Confluences: Trend (conflict with SMMA), Momentum (MACD positive), Volatility (neutral), Volume (low), Structure (neutral), ADX (weak). Trade direction conflicts with SMMA trend and not enough categories align.",
   "confidence": 2
 }}
 {{
   "action": "close",
-  "reason": "Confluences: Trend (SMMA turning down), Momentum (MACD), Structure (support break). Trend reversal: SMMA has turned down and price crossed SMMA. 15m MACD down, price broke below Ichimoku cloud, major SR break.",
+  "reason": "Confluences: Trend (SMMA turning down), Momentum (MACD), Structure (support break), Volatility (BB expansion), Volume (neutral), ADX (strong). Trend reversal: SMMA has turned down and price crossed SMMA. 15m MACD down, price broke below Ichimoku cloud, major SR break.",
   "confidence": 9
 }}
 
@@ -338,7 +346,7 @@ Indicators (1H): {ind_1h.dict()}
         action["categories"] = sorted(list(claimed))
         action["recovery_mode"] = in_recovery_mode
 
-        logging.info(f"📝 GPT Action: {action.get('action')} | Lot: {action.get('lot', 1)} | Confidence: {action.get('confidence', 0)} | Reason: {action.get('reason','(none)')} | Categories: {action['categories']} | Recovery: {action['recovery_mode']}")
+                logging.info(f"📝 GPT Action: {action.get('action')} | Lot: {action.get('lot', 1)} | Confidence: {action.get('confidence', 0)} | Reason: {action.get('reason','(none)')} | Categories: {action['categories']} | Recovery: {action['recovery_mode']}")
         if action.get("action") in allowed:
             return JSONResponse(content=action)
         else:
@@ -357,5 +365,5 @@ Indicators (1H): {ind_1h.dict()}
 @app.get("/")
 async def root():
     return {
-        "message": "SmartGPT EA SCALPER (GPT-3.5-turbo, ultra-strict, multi-confluence, strict SMMA, strict category-checked confluence, strict SL/TP suggestion, prop/session safety, E8 loss recovery, anti-lazy JSON enforcement)."
+        "message": "SmartGPT EA SCALPER (GPT-3.5-turbo, ultra-strict, multi-confluence, strict SMMA, strict category-checked confluence, strict SL/TP suggestion, prop/session safety, E8 loss recovery, anti-lazy JSON enforcement, and strict confluence explanations on every response)."
     }
