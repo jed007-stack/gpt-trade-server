@@ -44,6 +44,7 @@ class Indicators(BaseModel):
     lwma_period: Optional[int] = None
     smma: Optional[float] = None
     smma_period: Optional[int] = None
+    smma_array: Optional[List[float]] = None
     adx: Optional[float] = None
     mfi: Optional[float] = None
     williams_r: Optional[float] = None
@@ -142,6 +143,47 @@ def extract_categories(reason):
         if re.search(r"\b{}\b".format(cat), cats, re.IGNORECASE):
             found.add(cat.lower())
     return found
+
+def get_smma_direction(smma_array: Optional[List[float]]) -> Optional[str]:
+    if smma_array is not None and len(smma_array) >= 2:
+        prev, curr = smma_array[0], smma_array[1]
+        if curr > prev:
+            return "up"
+        elif curr < prev:
+            return "down"
+        else:
+            return "flat"
+    return None
+
+def smma_trend_check(trade: TradeData, action: str) -> (bool, str):
+    """
+    Checks if SMMA trend agrees with trade direction on main and higher timeframes.
+    Returns (True, "") if good. If not, returns (False, error message)
+    """
+    msg = ""
+    tf_names = ['Main', 'H1', 'H4']
+    tfs = [
+        trade.indicators,
+        trade.h1_indicators,
+        trade.h4_indicators
+    ]
+    trends = []
+    for tf, name in zip(tfs, tf_names):
+        if tf and tf.smma_array is not None and len(tf.smma_array) >= 2:
+            trend = get_smma_direction(tf.smma_array)
+            trends.append((name, trend, tf.smma_array))
+        else:
+            trends.append((name, None, tf.smma_array))
+    main_tf_trend = trends[0][1]
+    if action == "buy":
+        if main_tf_trend != "up":
+            msg = f"Trade direction is BUY but main timeframe SMMA is {main_tf_trend.upper() if main_tf_trend else 'UNKNOWN'} (values: {trends[0][2]})."
+            return False, msg
+    elif action == "sell":
+        if main_tf_trend != "down":
+            msg = f"Trade direction is SELL but main timeframe SMMA is {main_tf_trend.upper() if main_tf_trend else 'UNKNOWN'} (values: {trends[0][2]})."
+            return False, msg
+    return True, ""
 
 @app.post("/gpt/manage")
 async def gpt_manage(wrapper: TradeWrapper):
@@ -291,6 +333,13 @@ Indicators (1H): {ind_1h.dict()}
         claimed = extract_categories(action.get("reason", ""))
         cat_count = len(claimed)
         conf = action.get("confidence", 0)
+
+        # --- SMMA DIRECTION ENFORCEMENT ---
+        if action.get("action") in {"buy", "sell"}:
+            ok, msg = smma_trend_check(trade, action.get("action"))
+            if not ok:
+                action["action"] = "hold"
+                action["reason"] = (action.get("reason", "") + f" | {msg} (SMMA direction enforcement)").strip()
 
         # HARD anti-lazy: must have confluences and enough
         if ("confluences:" not in action.get("reason", "").lower()) or (cat_count < (4 if in_recovery_mode else 3)):
