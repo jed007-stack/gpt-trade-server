@@ -346,7 +346,7 @@ Indicators (1H): {ind_1h.dict()}
         action["categories"] = sorted(list(claimed))
         action["recovery_mode"] = in_recovery_mode
 
-                logging.info(f"📝 GPT Action: {action.get('action')} | Lot: {action.get('lot', 1)} | Confidence: {action.get('confidence', 0)} | Reason: {action.get('reason','(none)')} | Categories: {action['categories']} | Recovery: {action['recovery_mode']}")
+        logging.info(f"📝 GPT Action: {action.get('action')} | Lot: {action.get('lot', 1)} | Confidence: {action.get('confidence', 0)} | Reason: {action.get('reason','(none)')} | Categories: {action['categories']} | Recovery: {action['recovery_mode']}")
         if action.get("action") in allowed:
             return JSONResponse(content=action)
         else:
