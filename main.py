@@ -245,7 +245,7 @@ async def gpt_manage(wrapper: TradeWrapper):
         recovery_note = (
             "\n---\n"
             "RECOVERY MODE: The last trade was a loss and has not yet been recovered. "
-            "You must only recommend a trade if at least **4 out of 6 unique confluence categories** align and overall confidence is 8 or higher. "
+            "You must only recommend a trade if at least **4 out of 6 unique confluence categories** align and overall confidence is 7 or higher. "
             "You must *explicitly state which categories* are satisfied, and only one indicator per category is allowed (see below). "
             "If fewer than 4 unique categories are satisfied, hold. Justify recovery trades with extra strictness, and reference recovery mode in your reason."
             "\n---\n"
@@ -363,13 +363,13 @@ Indicators (1H): {ind_1h.dict()}
                 action["action"] = "hold"
                 action["reason"] += " | GPT did not return both new_sl and new_tp for this trade."
 
-        # ENFORCE confidence threshold
+        # ENFORCE confidence threshold (UPDATED)
         if in_recovery_mode:
-            if action.get("action") in {"buy", "sell"} and conf < 8:
+            if action.get("action") in {"buy", "sell"} and conf < 7:  # Was 8
                 action["action"] = "hold"
                 action["reason"] += " | Recovery mode: Not enough confluence/confidence for recovery entry."
         else:
-            if action.get("action") in {"buy", "sell"} and conf < 7:
+            if action.get("action") in {"buy", "sell"} and conf < 5:  # Was 7
                 action["action"] = "hold"
                 action["reason"] += " (confidence too low for entry)"
 
