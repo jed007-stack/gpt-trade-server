@@ -380,12 +380,17 @@ Indicators (1H): {ind_1h.dict()}
             action["reason"] = "No reasoning returned by GPT."
 
         # Prevent "close" at high confidence unless enough categories signal a real reversal
-        if pos and action.get("action") == "close" and action.get("confidence", 0) >= 7:
-            reason = action.get("reason", "")
-            flipped_cats = extract_categories(reason)
-            if len(flipped_cats) < 4:
-                action["action"] = "hold"
-                action["reason"] += " | Close not allowed at high confidence unless 4+ categories signal reversal."
+if pos and action.get("action") == "close" and action.get("confidence", 0) >= 9:
+    reason = action.get("reason", "")
+    flipped_cats = extract_categories(reason)
+    if len(flipped_cats) < 4:
+        action["action"] = "hold"
+        action["reason"] += " | Close not allowed at high confidence unless 4+ categories signal reversal."
+
+# Absolute override: never close at confidence 8+
+if pos and action.get("action") == "close" and action.get("confidence", 0) >= 8:
+    action["action"] = "hold"
+    action["reason"] += f" | Close blocked: GPT confidence {action.get('confidence', 0)} >=8, holding position."
         
         # SL Breakeven Guard
         if pos and pos.open_price and pos.sl is not None:
