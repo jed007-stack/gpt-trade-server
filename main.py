@@ -157,10 +157,6 @@ def get_smma_direction(smma_array: Optional[List[float]]) -> Optional[str]:
 
 # === Multi-TF SMMA Enforcement ===
 def smma_trend_check_multi(trade: TradeData, action: str) -> (bool, str, int):
-    """
-    Enforces: Main timeframe SMMA and at least one higher timeframe SMMA (M15 or H1) must agree with direction.
-    Returns (allowed: bool, message: str, confidence_boost: int)
-    """
     tf_names = ['Main', 'H1', 'H4']
     tfs = [trade.indicators, trade.h1_indicators, trade.h4_indicators]
     trends = []
@@ -251,7 +247,6 @@ async def gpt_manage(wrapper: TradeWrapper):
             "\n---\n"
         )
 
-    # === NEW STRICT PROMPT ===
     prompt = f"""{recovery_note}
 You are a decisive, disciplined prop firm trading assistant. DO NOT be lazy or generic; always justify every action using live indicator values and current price context. NEVER reuse generic logic.
 If you do not explicitly list at least {(4 if in_recovery_mode else 3)} unique categories (Trend, Momentum, Volatility, Volume, Structure, ADX) in your reason as in the example, your action will be set to 'hold' and the trade will not be taken.
@@ -313,11 +308,6 @@ EXAMPLES (JSON only, strictly follow this style):
   "reason": "Confluences: Trend (conflict with SMMA), Momentum (MACD positive), Volatility (neutral), Volume (low), Structure (neutral), ADX (weak). Trade direction conflicts with SMMA trend and not enough categories align.",
   "confidence": 2
 }}
-{{
-  "action": "close",
-  "reason": "Confluences: Trend (SMMA turning down), Momentum (MACD), Structure (support break), Volatility (BB expansion), Volume (neutral), ADX (strong). Trend reversal: SMMA has turned down and price crossed SMMA. 15m MACD down, price broke below Ichimoku cloud, major SR break.",
-  "confidence": 9
-}}
 
 Current Cross Signal: {cross_signal}
 Current Cross Meaning: {cross_meaning}
@@ -346,7 +336,12 @@ Indicators (1H): {ind_1h.dict()}
         logging.info(f"🎯 GPT Decision (raw): {decision}")
 
         action = flatten_action(decision)
-        allowed = {"hold", "close", "trail_sl", "trail_tp", "buy", "sell"}
+        allowed = {"hold", "buy", "sell"}
+
+        # --- Convert ALL close/trail actions to hold (EA will never close from GPT) ---
+        if action.get("action") not in allowed:
+            action["action"] = "hold"
+            action["reason"] += " | All closing/trailing handled by EA only. Signal-only mode."
 
         claimed = extract_categories(action.get("reason", ""))
         cat_count = len(claimed)
@@ -357,19 +352,19 @@ Indicators (1H): {ind_1h.dict()}
             action["action"] = "hold"
             action["reason"] += f" | GPT did not properly explain confluences or unique categories ({cat_count} found)."
 
-        # ENFORCE SL/TP suggestions on all entries
+        # ENFORCE SL/TP suggestions on all entries (info only)
         if action.get("action") in {"buy", "sell"}:
             if "new_sl" not in action or "new_tp" not in action:
                 action["action"] = "hold"
                 action["reason"] += " | GPT did not return both new_sl and new_tp for this trade."
 
-        # ENFORCE confidence threshold (UPDATED)
+        # ENFORCE confidence threshold
         if in_recovery_mode:
-            if action.get("action") in {"buy", "sell"} and conf < 7:  # Was 8
+            if action.get("action") in {"buy", "sell"} and conf < 7:
                 action["action"] = "hold"
                 action["reason"] += " | Recovery mode: Not enough confluence/confidence for recovery entry."
         else:
-            if action.get("action") in {"buy", "sell"} and conf < 5:  # Was 7
+            if action.get("action") in {"buy", "sell"} and conf < 5:
                 action["action"] = "hold"
                 action["reason"] += " (confidence too low for entry)"
 
@@ -378,21 +373,6 @@ Indicators (1H): {ind_1h.dict()}
 
         if "reason" not in action or not action["reason"]:
             action["reason"] = "No reasoning returned by GPT."
-
-        # Prevent "close" at high confidence unless enough categories signal a real reversal
-        if pos and action.get("action") == "close" and action.get("confidence", 0) >=9 :
-            reason = action.get("reason", "")
-            flipped_cats = extract_categories(reason)
-            if len(flipped_cats) < 4:
-                action["action"] = "hold"
-                action["reason"] += " | Close not allowed at high confidence unless 7+ categories signal reversal."
-        
-        # SL Breakeven Guard
-        if pos and pos.open_price and pos.sl is not None:
-            if abs(pos.sl - pos.open_price) < 1e-5:
-                if "new_sl" in action and action["new_sl"] != pos.sl:
-                    action["reason"] += " | SL at breakeven, not allowed to move."
-                    action["new_sl"] = pos.sl
 
         # === MULTI-TF SMMA ENFORCEMENT ===
         if action.get("action") in {"buy", "sell"}:
@@ -407,8 +387,8 @@ Indicators (1H): {ind_1h.dict()}
         # Friday/weekend/session guards
         if is_friday_5pm_or_later():
             if pos and pos.pnl and pos.pnl > 0 and action.get("action") not in {"close", "hold"}:
-                action["action"] = "close"
-                action["reason"] += " | Closing profitable trade before weekend."
+                action["action"] = "hold"
+                action["reason"] += " | No new trades after 17:00 UK time Friday (weekend risk)."
             elif action.get("action") in {"buy", "sell"}:
                 action["action"] = "hold"
                 action["reason"] += " | No new trades after 17:00 UK time Friday (weekend risk)."
@@ -418,17 +398,14 @@ Indicators (1H): {ind_1h.dict()}
                 action["action"] = "hold"
                 action["reason"] += " | No new trades between 21:00 and 23:00 UK time."
             if is_between_uk_time(21, 22) and pos.pnl > 0 and action.get("action") not in {"close", "hold"}:
-                action["action"] = "close"
+                action["action"] = "hold"
                 action["reason"] += " | Closing profitable trade before 22:00 UK."
 
         action["categories"] = sorted(list(claimed))
         action["recovery_mode"] = in_recovery_mode
 
         logging.info(f"📝 GPT Action: {action.get('action')} | Lot: {action.get('lot', 1)} | Confidence: {action.get('confidence', 0)} | Reason: {action.get('reason','(none)')} | Categories: {action['categories']} | Recovery: {action['recovery_mode']}")
-        if action.get("action") in allowed:
-            return JSONResponse(content=action)
-        else:
-            return JSONResponse(content=action)
+        return JSONResponse(content=action)
 
     except Exception as e:
         logging.error(f"❌ GPT Error: {str(e)}")
@@ -443,5 +420,5 @@ Indicators (1H): {ind_1h.dict()}
 @app.get("/")
 async def root():
     return {
-        "message": "SmartGPT EA SCALPER (GPT-4o, ultra-strict, multi-confluence, strict SMMA enforcement, multi-timeframe agreement required, category-checked confluence, strict SL/TP suggestion, prop/session safety, E8 loss recovery, anti-lazy JSON enforcement, and strict confluence explanations on every response)."
+        "message": "SmartGPT EA SCALPER (Signal-only mode: no GPT-based closes, all closing handled by EA, buy/sell/hold only.)"
     }
