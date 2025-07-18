@@ -144,25 +144,32 @@ def extract_categories(reason):
             found.add(cat.lower())
     return found
 
-def get_smma_direction(smma_array: Optional[List[float]]) -> Optional[str]:
-    if smma_array is not None and len(smma_array) >= 2:
-        prev, curr = smma_array[0], smma_array[1]
-        if curr > prev:
+# === NEW Robust SMMA Trend Strength Helper (5 closed bars, not current) ===
+def get_smma_trend_strength(smma_array: Optional[List[float]], bars: int = 5) -> Optional[str]:
+    """
+    Returns 'up', 'down', or 'flat' based on the SMMA over the last {bars} FULLY CLOSED bars
+    (excludes the current in-progress bar). Assumes smma_array[0] is the current (unclosed) bar,
+    smma_array[1] is the most recent closed bar, etc.
+    """
+    if smma_array is not None and len(smma_array) > bars:
+        earliest = smma_array[bars]     # bar furthest back (oldest closed in range)
+        latest = smma_array[1]          # most recent CLOSED bar (not [0])
+        if latest > earliest:
             return "up"
-        elif curr < prev:
+        elif latest < earliest:
             return "down"
         else:
             return "flat"
     return None
 
-# === Multi-TF SMMA Enforcement ===
+# === Multi-TF SMMA Enforcement (uses new helper) ===
 def smma_trend_check_multi(trade: TradeData, action: str) -> (bool, str, int):
     tf_names = ['Main', 'H1', 'H4']
     tfs = [trade.indicators, trade.h1_indicators, trade.h4_indicators]
     trends = []
     for tf, name in zip(tfs, tf_names):
-        if tf and tf.smma_array and len(tf.smma_array) >= 2:
-            trend = get_smma_direction(tf.smma_array)
+        if tf and tf.smma_array and len(tf.smma_array) > 5:
+            trend = get_smma_trend_strength(tf.smma_array, bars=5)
             trends.append((name, trend, tf.smma_array))
         else:
             trends.append((name, None, tf.smma_array))
