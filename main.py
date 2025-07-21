@@ -400,13 +400,13 @@ Indicators (1H): {ind_1h.dict()}
                 action["action"] = "hold"
                 action["reason"] += " | No new trades after 17:00 UK time Friday (weekend risk)."
 
-        if pos and pos.pnl and acc:
-            if is_between_uk_time(21, 23:30) and action.get("action") in {"buy", "sell"}:
-                action["action"] = "hold"
-                action["reason"] += " | No new trades between 21:00 and 23:30 UK time."
-            if is_between_uk_time(21, 23:30) and pos.pnl > 0 and action.get("action") not in {"close", "hold"}:
-                action["action"] = "hold"
-                action["reason"] += " | Closing profitable trade before 21:00 UK."
+       if is_between_uk_time(21, 0, 23, 30) and action.get("action") in {"buy", "sell"}:
+    action["action"] = "hold"
+    action["reason"] += " | No new trades between 21:00 and 23:30 UK time."
+if is_between_uk_time(21, 0, 23, 30) and pos.pnl > 0 and action.get("action") not in {"close", "hold"}:
+    action["action"] = "hold"
+    action["reason"] += " | Closing profitable trade before 21:00 UK."
+
 
         action["categories"] = sorted(list(claimed))
         action["recovery_mode"] = in_recovery_mode
