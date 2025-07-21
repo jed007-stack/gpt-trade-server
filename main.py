@@ -125,9 +125,15 @@ def uk_time_now():
     london = pytz.timezone('Europe/London')
     return utc_now.replace(tzinfo=pytz.utc).astimezone(london)
 
-def is_between_uk_time(start_h, end_h):
+def is_between_uk_time(start_h, start_m, end_h, end_m):
     now = uk_time_now().time()
-    return time(start_h, 0) <= now < time(end_h, 0)
+    start = time(start_h, start_m)
+    end = time(end_h, end_m)
+    # Handles crossing midnight (e.g. 21:00 to 00:00)
+    if start < end:
+        return start <= now < end
+    else:
+        return now >= start or now < end
 
 def is_friday_5pm_or_later():
     now = uk_time_now()
@@ -146,11 +152,6 @@ def extract_categories(reason):
 
 # === NEW Robust SMMA Trend Strength Helper (5 closed bars, not current) ===
 def get_smma_trend_strength(smma_array: Optional[List[float]], bars: int = 5) -> Optional[str]:
-    """
-    Returns 'up', 'down', or 'flat' based on the SMMA over the last {bars} FULLY CLOSED bars
-    (excludes the current in-progress bar). Assumes smma_array[0] is the current (unclosed) bar,
-    smma_array[1] is the most recent closed bar, etc.
-    """
     if smma_array is not None and len(smma_array) > bars:
         earliest = smma_array[bars]     # bar furthest back (oldest closed in range)
         latest = smma_array[1]          # most recent CLOSED bar (not [0])
@@ -162,7 +163,6 @@ def get_smma_trend_strength(smma_array: Optional[List[float]], bars: int = 5) ->
             return "flat"
     return None
 
-# === Multi-TF SMMA Enforcement (uses new helper) ===
 def smma_trend_check_multi(trade: TradeData, action: str) -> (bool, str, int):
     tf_names = ['Main', 'H1', 'H4']
     tfs = [trade.indicators, trade.h1_indicators, trade.h4_indicators]
@@ -284,7 +284,7 @@ ENTRY RULES:
 
 RISK/SESSION GUARDS:
 - DO NOT move SL if SL is already at breakeven (SL == entry price).
-- DO NOT suggest or open new trades after 17:00 UK time Friday, or between 21:00-23:00 UK time.
+- DO NOT suggest or open new trades after 17:00 UK time Friday, or between 21:00-00:00 UK time.
 - Always try to close profitable trades before 22:00 UK or before the weekend.
 - EA handles all partial profit and break-even moves.
 
@@ -400,13 +400,13 @@ Indicators (1H): {ind_1h.dict()}
                 action["action"] = "hold"
                 action["reason"] += " | No new trades after 17:00 UK time Friday (weekend risk)."
 
-       if is_between_uk_time(21, 0, 23, 30) and action.get("action") in {"buy", "sell"}:
-    action["action"] = "hold"
-    action["reason"] += " | No new trades between 21:00 and 23:30 UK time."
-if is_between_uk_time(21, 0, 23, 30) and pos.pnl > 0 and action.get("action") not in {"close", "hold"}:
-    action["action"] = "hold"
-    action["reason"] += " | Closing profitable trade before 21:00 UK."
-
+        # === SESSION GUARD: 21:00 to 00:00 UK ===
+        if is_between_uk_time(21, 0, 0, 0) and action.get("action") in {"buy", "sell"}:
+            action["action"] = "hold"
+            action["reason"] += " | No new trades between 21:00 and 00:00 UK time."
+        if is_between_uk_time(21, 0, 0, 0) and pos and pos.pnl and pos.pnl > 0 and action.get("action") not in {"close", "hold"}:
+            action["action"] = "hold"
+            action["reason"] += " | Closing profitable trade before 00:00 UK."
 
         action["categories"] = sorted(list(claimed))
         action["recovery_mode"] = in_recovery_mode
