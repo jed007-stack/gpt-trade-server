@@ -125,15 +125,9 @@ def uk_time_now():
     london = pytz.timezone('Europe/London')
     return utc_now.replace(tzinfo=pytz.utc).astimezone(london)
 
-def is_between_uk_time(start_h, start_m, end_h, end_m):
+def is_between_uk_time(start_h, end_h):
     now = uk_time_now().time()
-    start = time(start_h, start_m)
-    end = time(end_h, end_m)
-    # Handles crossing midnight (e.g. 21:00 to 00:00)
-    if start < end:
-        return start <= now < end
-    else:
-        return now >= start or now < end
+    return time(start_h, 0) <= now < time(end_h, 0)
 
 def is_friday_5pm_or_later():
     now = uk_time_now()
@@ -149,49 +143,6 @@ def extract_categories(reason):
         if re.search(r"\b{}\b".format(cat), cats, re.IGNORECASE):
             found.add(cat.lower())
     return found
-
-# === Loosened SMMA Trend Strength Helper (works with as few as 2 values) ===
-def get_smma_trend_strength(smma_array: Optional[List[float]], bars: int = 5) -> Optional[str]:
-    if smma_array is not None and len(smma_array) > 1:
-        earliest = smma_array[min(bars, len(smma_array) - 1)]
-        latest = smma_array[1]
-        if latest > earliest:
-            return "up"
-        elif latest < earliest:
-            return "down"
-        else:
-            return "flat"
-    return "unknown"
-
-# === LOOSENED: Only require main timeframe SMMA, allow "flat/unknown" ===
-def smma_trend_check_multi(trade: TradeData, action: str) -> (bool, str, int):
-    tf = trade.indicators  # Only main
-    trend = None
-    smma_array = []
-    if tf and tf.smma_array and len(tf.smma_array) > 1:
-        trend = get_smma_trend_strength(tf.smma_array)
-        smma_array = tf.smma_array
-    else:
-        trend = "unknown"
-        smma_array = tf.smma_array if tf else []
-
-    trend_dir = {"buy": "up", "sell": "down"}
-    required = trend_dir.get(action, None)
-    allowed = False
-    message = ""
-    confidence_boost = 0
-
-    # Only block if main trend is *actively* against, otherwise allow (flat/unknown is fine)
-    if trend == required or trend in ["flat", "unknown"]:
-        allowed = True
-        if trend == required:
-            confidence_boost = 1
-    else:
-        message = (f"Trade direction is {action.upper()} but main SMMA is {trend.upper()} "
-                   f"(values: {smma_array}).")
-        allowed = False
-
-    return allowed, message, confidence_boost
 
 @app.post("/gpt/manage")
 async def gpt_manage(wrapper: TradeWrapper):
@@ -235,15 +186,24 @@ async def gpt_manage(wrapper: TradeWrapper):
         recovery_note = (
             "\n---\n"
             "RECOVERY MODE: The last trade was a loss and has not yet been recovered. "
-            "You must only recommend a trade if at least **4 out of 6 unique confluence categories** align and overall confidence is 7 or higher. "
+            "You must only recommend a trade if at least **5 out of 6 unique confluence categories** align and overall confidence is 8 or higher. "
             "You must *explicitly state which categories* are satisfied, and only one indicator per category is allowed (see below). "
-            "If fewer than 4 unique categories are satisfied, hold. Justify recovery trades with extra strictness, and reference recovery mode in your reason."
+            "If fewer than 5 unique categories are satisfied, hold. Justify recovery trades with extra strictness, and reference recovery mode in your reason."
             "\n---\n"
         )
 
-    prompt = f"""{recovery_note}
+    # === STRONG CROSSOVER NOTE ===
+    strong_cross_note = ""
+    if cross_signal in {"ema_over_lwma", "ema_under_lwma"}:
+        strong_cross_note = (
+            "**NOTE:** The EMA/LWMA crossover on this bar is historically a strong standalone entry. "
+            "Still, all confluence rules must be strictly satisfied below.\n"
+        )
+
+    # === NEW STRICT PROMPT ===
+    prompt = f"""{recovery_note}{strong_cross_note}
 You are a decisive, disciplined prop firm trading assistant. DO NOT be lazy or generic; always justify every action using live indicator values and current price context. NEVER reuse generic logic.
-If you do not explicitly list at least {(4 if in_recovery_mode else 3)} unique categories (Trend, Momentum, Volatility, Volume, Structure, ADX) in your reason as in the example, your action will be set to 'hold' and the trade will not be taken.
+If you do not explicitly list at least {(5 if in_recovery_mode else 4)} unique categories (Trend, Momentum, Volatility, Volume, Structure, ADX) in your reason as in the example, your action will be set to 'hold' and the trade will not be taken.
 Never say just 'multiple confluences' or generic logic. List each category and which indicator fills it, every time.
 
 CONFLUENCE LOGIC:
@@ -262,16 +222,15 @@ CONFLUENCE LOGIC:
 - Do NOT claim more than 6 confluences; do not count two momentum or two trend indicators as separate.
 
 ENTRY RULES:
-- Never recommend a trade if SMMA (slow MA) is trending opposite to the entry direction on main timeframe (unless it is "flat" or "unknown", which is allowed). If so, reply with "hold" and explain: "Trade direction conflicts with SMMA trend."
-- Only take a trade if at least {(4 if in_recovery_mode else 3)} different categories align (not just indicators).
-- In recovery mode, at least 4 out of 6 categories must align, per above.
-- If main SMMA agrees, add +1 confidence to the decision.
+- Only take a trade if at least {(5 if in_recovery_mode else 4)} different categories align (not just indicators).
+- In recovery mode, at least 5 out of 6 categories must align, per above.
+- If ALL 3 (main, H1, H4) SMMA trends agree (strongest trend), add +1 confidence to the decision.
 - If price is close to, hugging, or crossing SMMA, reduce confidence and consider holding or warning of possible trend reversal.
 - Always mention SMMA status for every signal and justify your confidence.
 
 RISK/SESSION GUARDS:
 - DO NOT move SL if SL is already at breakeven (SL == entry price).
-- DO NOT suggest or open new trades after 17:00 UK time Friday, or between 21:00-00:00 UK time.
+- DO NOT suggest or open new trades after 17:00 UK time Friday, or between 21:00-23:00 UK time.
 - Always try to close profitable trades before 22:00 UK or before the weekend.
 - EA handles all partial profit and break-even moves.
 
@@ -279,13 +238,13 @@ SL/TP RULES:
 - SL: Just beyond last swing high/low or min 1xATR.
 - TP: At least 2xSL, or at next major SR/Fibonacci level.
 
-**NEW STRICT CONFLUENCE REQUIREMENT:**  
+**STRICT CONFLUENCE REQUIREMENT:**  
 For EVERY response, including "hold" and "close", you must ALWAYS include a full 'Confluences:' line.  
 - List every category (Trend, Momentum, Volatility, Volume, Structure, ADX).  
 - For each, state the present indicator, value, and if it confirms, is neutral, or conflicts.  
 - Example (hold):  
   Confluences: Trend (conflict with SMMA), Momentum (MACD positive), Volatility (neutral), Volume (low), Structure (neutral), ADX (weak).  
-- After the confluences line, clearly explain why action is "hold" (e.g. "Trade direction conflicts with SMMA trend and not enough categories align.")  
+- After the confluences line, clearly explain why action is "hold" (e.g. "Not enough categories align.")  
 - **Never skip the confluences line, even for "hold" or session filter.**
 
 EXAMPLES (JSON only, strictly follow this style):
@@ -299,8 +258,13 @@ EXAMPLES (JSON only, strictly follow this style):
 }}
 {{
   "action": "hold",
-  "reason": "Confluences: Trend (conflict with SMMA), Momentum (MACD positive), Volatility (neutral), Volume (low), Structure (neutral), ADX (weak). Trade direction conflicts with SMMA trend and not enough categories align.",
+  "reason": "Confluences: Trend (conflict with SMMA), Momentum (MACD positive), Volatility (neutral), Volume (low), Structure (neutral), ADX (weak). Not enough categories align.",
   "confidence": 2
+}}
+{{
+  "action": "close",
+  "reason": "Confluences: Trend (SMMA turning down), Momentum (MACD), Structure (support break), Volatility (BB expansion), Volume (neutral), ADX (strong). Trend reversal: SMMA has turned down and price crossed SMMA. 15m MACD down, price broke below Ichimoku cloud, major SR break.",
+  "confidence": 9
 }}
 
 Current Cross Signal: {cross_signal}
@@ -323,44 +287,37 @@ Indicators (1H): {ind_1h.dict()}
                 {"role": "system", "content": "You are an elite, disciplined, risk-aware SCALPER trade assistant. Reply ONLY in valid JSON. Fill all fields. For every buy or sell, always suggest new_sl and new_tp."},
                 {"role": "user", "content": prompt}
             ],
-            max_tokens=600,
+            max_tokens=700,
             temperature=0.13
         )
         decision = chat.choices[0].message.content.strip()
         logging.info(f"🎯 GPT Decision (raw): {decision}")
 
         action = flatten_action(decision)
-        allowed = {"hold", "buy", "sell"}
-
-        # --- Convert ALL close/trail actions to hold (EA will never close from GPT) ---
-        if action.get("action") not in allowed:
-            action["action"] = "hold"
-            action["reason"] += " | All closing/trailing handled by EA only. Signal-only mode."
+        allowed = {"hold", "close", "trail_sl", "trail_tp", "buy", "sell"}
 
         claimed = extract_categories(action.get("reason", ""))
         cat_count = len(claimed)
         conf = action.get("confidence", 0)
 
-        # HARD anti-lazy: must have confluences and enough
-        if ("confluences:" not in action.get("reason", "").lower()) or (cat_count < (4 if in_recovery_mode else 3)):
+        # Confluence and confidence enforcement
+        min_cats = 5 if in_recovery_mode else 4
+        min_conf = 8 if in_recovery_mode else 6
+
+        if ("confluences:" not in action.get("reason", "").lower()) or (cat_count < min_cats):
             action["action"] = "hold"
             action["reason"] += f" | GPT did not properly explain confluences or unique categories ({cat_count} found)."
 
-        # ENFORCE SL/TP suggestions on all entries (info only)
+        # ENFORCE SL/TP suggestions on all entries
         if action.get("action") in {"buy", "sell"}:
             if "new_sl" not in action or "new_tp" not in action:
                 action["action"] = "hold"
                 action["reason"] += " | GPT did not return both new_sl and new_tp for this trade."
 
         # ENFORCE confidence threshold
-        if in_recovery_mode:
-            if action.get("action") in {"buy", "sell"} and conf < 7:
-                action["action"] = "hold"
-                action["reason"] += " | Recovery mode: Not enough confluence/confidence for recovery entry."
-        else:
-            if action.get("action") in {"buy", "sell"} and conf < 5:
-                action["action"] = "hold"
-                action["reason"] += " (confidence too low for entry)"
+        if action.get("action") in {"buy", "sell"} and conf < min_conf:
+            action["action"] = "hold"
+            action["reason"] += f" (confidence too low for entry, {conf})"
 
         if action.get("action") in {"buy", "sell"} and "lot" not in action:
             action["lot"] = 2 if conf >= 9 else 1
@@ -368,38 +325,46 @@ Indicators (1H): {ind_1h.dict()}
         if "reason" not in action or not action["reason"]:
             action["reason"] = "No reasoning returned by GPT."
 
-        # === MULTI-TF SMMA ENFORCEMENT (Looser, main only) ===
-        if action.get("action") in {"buy", "sell"}:
-            ok, msg, conf_boost = smma_trend_check_multi(trade, action.get("action"))
-            if not ok:
+        # Prevent "close" at high confidence unless enough categories signal a real reversal
+        if pos and action.get("action") == "close" and action.get("confidence", 0) >=9 :
+            reason = action.get("reason", "")
+            flipped_cats = extract_categories(reason)
+            if len(flipped_cats) < 4:
                 action["action"] = "hold"
-                action["reason"] = (action.get("reason", "") + f" | {msg} (SMMA main timeframe direction enforcement)").strip()
-            elif conf_boost:
-                action["confidence"] = int(action.get("confidence", 0)) + conf_boost
-                action["reason"] = (action.get("reason", "") + f" | Main SMMA trend agrees with direction. Confidence boosted by {conf_boost}.").strip()
+                action["reason"] += " | Close not allowed at high confidence unless 4+ categories signal reversal."
+        
+        # SL Breakeven Guard
+        if pos and pos.open_price and pos.sl is not None:
+            if abs(pos.sl - pos.open_price) < 1e-5:
+                if "new_sl" in action and action["new_sl"] != pos.sl:
+                    action["reason"] += " | SL at breakeven, not allowed to move."
+                    action["new_sl"] = pos.sl
 
         # Friday/weekend/session guards
         if is_friday_5pm_or_later():
             if pos and pos.pnl and pos.pnl > 0 and action.get("action") not in {"close", "hold"}:
-                action["action"] = "hold"
-                action["reason"] += " | No new trades after 17:00 UK time Friday (weekend risk)."
+                action["action"] = "close"
+                action["reason"] += " | Closing profitable trade before weekend."
             elif action.get("action") in {"buy", "sell"}:
                 action["action"] = "hold"
                 action["reason"] += " | No new trades after 17:00 UK time Friday (weekend risk)."
 
-        # === SESSION GUARD: 21:00 to 00:00 UK ===
-        if is_between_uk_time(21, 0, 0, 0) and action.get("action") in {"buy", "sell"}:
-            action["action"] = "hold"
-            action["reason"] += " | No new trades between 21:00 and 00:00 UK time."
-        if is_between_uk_time(21, 0, 0, 0) and pos and pos.pnl and pos.pnl > 0 and action.get("action") not in {"close", "hold"}:
-            action["action"] = "hold"
-            action["reason"] += " | Closing profitable trade before 00:00 UK."
+        if pos and pos.pnl and acc:
+            if is_between_uk_time(21, 23) and action.get("action") in {"buy", "sell"}:
+                action["action"] = "hold"
+                action["reason"] += " | No new trades between 21:00 and 23:00 UK time."
+            if is_between_uk_time(21, 22) and pos.pnl > 0 and action.get("action") not in {"close", "hold"}:
+                action["action"] = "close"
+                action["reason"] += " | Closing profitable trade before 22:00 UK."
 
         action["categories"] = sorted(list(claimed))
         action["recovery_mode"] = in_recovery_mode
 
         logging.info(f"📝 GPT Action: {action.get('action')} | Lot: {action.get('lot', 1)} | Confidence: {action.get('confidence', 0)} | Reason: {action.get('reason','(none)')} | Categories: {action['categories']} | Recovery: {action['recovery_mode']}")
-        return JSONResponse(content=action)
+        if action.get("action") in allowed:
+            return JSONResponse(content=action)
+        else:
+            return JSONResponse(content=action)
 
     except Exception as e:
         logging.error(f"❌ GPT Error: {str(e)}")
@@ -414,5 +379,5 @@ Indicators (1H): {ind_1h.dict()}
 @app.get("/")
 async def root():
     return {
-        "message": "SmartGPT EA SCALPER (Signal-only mode: no GPT-based closes, all closing handled by EA, buy/sell/hold only.)"
+        "message": "SmartGPT EA SCALPER (GPT-4o, strict confluence, strict confidence, SL/TP enforcement, prop/session safety, recovery mode, anti-lazy JSON/logic enforcement, EMA/LWMA strong cross logic highlighted, everything fully explained every response)."
     }
