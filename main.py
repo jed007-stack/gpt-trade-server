@@ -150,50 +150,45 @@ def extract_categories(reason):
             found.add(cat.lower())
     return found
 
-# === Loosened SMMA Trend Strength Helper (same) ===
+# === Loosened SMMA Trend Strength Helper (works with as few as 2 values) ===
 def get_smma_trend_strength(smma_array: Optional[List[float]], bars: int = 5) -> Optional[str]:
-    if smma_array is not None and len(smma_array) > bars:
-        earliest = smma_array[bars]     # bar furthest back (oldest closed in range)
-        latest = smma_array[1]          # most recent CLOSED bar (not [0])
+    if smma_array is not None and len(smma_array) > 1:
+        earliest = smma_array[min(bars, len(smma_array) - 1)]
+        latest = smma_array[1]
         if latest > earliest:
             return "up"
         elif latest < earliest:
             return "down"
         else:
             return "flat"
-    return None
+    return "unknown"
 
-# === LOOSENED: Only require main timeframe SMMA, allow "flat" ===
+# === LOOSENED: Only require main timeframe SMMA, allow "flat/unknown" ===
 def smma_trend_check_multi(trade: TradeData, action: str) -> (bool, str, int):
-    tf_names = ['Main', 'H1', 'H4']
-    tfs = [trade.indicators, trade.h1_indicators, trade.h4_indicators]
-    trends = []
-    for tf, name in zip(tfs, tf_names):
-        if tf and tf.smma_array and len(tf.smma_array) > 5:
-            trend = get_smma_trend_strength(tf.smma_array, bars=5)
-            trends.append((name, trend, tf.smma_array))
-        else:
-            trends.append((name, None, tf.smma_array))
+    tf = trade.indicators  # Only main
+    trend = None
+    smma_array = []
+    if tf and tf.smma_array and len(tf.smma_array) > 1:
+        trend = get_smma_trend_strength(tf.smma_array)
+        smma_array = tf.smma_array
+    else:
+        trend = "unknown"
+        smma_array = tf.smma_array if tf else []
 
-    main_trend = trends[0][1]
-    h1_trend = trends[1][1]
-    h4_trend = trends[2][1]
     trend_dir = {"buy": "up", "sell": "down"}
-
     required = trend_dir.get(action, None)
     allowed = False
     message = ""
     confidence_boost = 0
 
-    # --- LOOSER: Only block if main trend is *actively* against, otherwise allow ---
-    if main_trend == required or main_trend == "flat":
+    # Only block if main trend is *actively* against, otherwise allow (flat/unknown is fine)
+    if trend == required or trend in ["flat", "unknown"]:
         allowed = True
-        # Bonus: if all three agree, boost confidence
-        if main_trend == required and h1_trend == required and h4_trend == required:
+        if trend == required:
             confidence_boost = 1
     else:
-        message = (f"Trade direction is {action.upper()} but main SMMA is {main_trend.upper() if main_trend else 'UNKNOWN'} "
-                   f"(values: {trends[0][2]}).")
+        message = (f"Trade direction is {action.upper()} but main SMMA is {trend.upper()} "
+                   f"(values: {smma_array}).")
         allowed = False
 
     return allowed, message, confidence_boost
@@ -267,10 +262,10 @@ CONFLUENCE LOGIC:
 - Do NOT claim more than 6 confluences; do not count two momentum or two trend indicators as separate.
 
 ENTRY RULES:
-- Never recommend a trade if SMMA (slow MA) is trending opposite to the entry direction on main timeframe (unless it is "flat", which is allowed). If so, reply with "hold" and explain: "Trade direction conflicts with SMMA trend."
+- Never recommend a trade if SMMA (slow MA) is trending opposite to the entry direction on main timeframe (unless it is "flat" or "unknown", which is allowed). If so, reply with "hold" and explain: "Trade direction conflicts with SMMA trend."
 - Only take a trade if at least {(4 if in_recovery_mode else 3)} different categories align (not just indicators).
 - In recovery mode, at least 4 out of 6 categories must align, per above.
-- If ALL 3 (main, H1, H4) agree (strongest trend), add +1 confidence to the decision.
+- If main SMMA agrees, add +1 confidence to the decision.
 - If price is close to, hugging, or crossing SMMA, reduce confidence and consider holding or warning of possible trend reversal.
 - Always mention SMMA status for every signal and justify your confidence.
 
@@ -373,15 +368,15 @@ Indicators (1H): {ind_1h.dict()}
         if "reason" not in action or not action["reason"]:
             action["reason"] = "No reasoning returned by GPT."
 
-        # === MULTI-TF SMMA ENFORCEMENT (Looser) ===
+        # === MULTI-TF SMMA ENFORCEMENT (Looser, main only) ===
         if action.get("action") in {"buy", "sell"}:
             ok, msg, conf_boost = smma_trend_check_multi(trade, action.get("action"))
             if not ok:
                 action["action"] = "hold"
-                action["reason"] = (action.get("reason", "") + f" | {msg} (SMMA multi-timeframe direction enforcement)").strip()
+                action["reason"] = (action.get("reason", "") + f" | {msg} (SMMA main timeframe direction enforcement)").strip()
             elif conf_boost:
                 action["confidence"] = int(action.get("confidence", 0)) + conf_boost
-                action["reason"] = (action.get("reason", "") + f" | All SMMA trends agree: main, H1, and H4. Confidence boosted by {conf_boost}.").strip()
+                action["reason"] = (action.get("reason", "") + f" | Main SMMA trend agrees with direction. Confidence boosted by {conf_boost}.").strip()
 
         # Friday/weekend/session guards
         if is_friday_5pm_or_later():
