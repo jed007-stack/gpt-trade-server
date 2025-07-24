@@ -40,11 +40,9 @@ class Indicators(BaseModel):
     macd: Optional[MACD] = None
     ema: Optional[float] = None
     ema_period: Optional[int] = None
+    ema_array: Optional[List[float]] = None  # Add for EMA100 trend checks
     lwma: Optional[float] = None
     lwma_period: Optional[int] = None
-    smma: Optional[float] = None
-    smma_period: Optional[int] = None
-    smma_array: Optional[List[float]] = None
     adx: Optional[float] = None
     mfi: Optional[float] = None
     williams_r: Optional[float] = None
@@ -144,6 +142,27 @@ def extract_categories(reason):
             found.add(cat.lower())
     return found
 
+# === EMA100 Trend Logic ===
+def ema100_trend(ind):
+    if not ind or not ind.ema_array or len(ind.ema_array) < 2:
+        return 0
+    prev_ema = ind.ema_array[-2]
+    curr_ema = ind.ema_array[-1]
+    if curr_ema > prev_ema:
+        return 1
+    elif curr_ema < prev_ema:
+        return -1
+    return 0
+
+def ema100_confirms(ind, action):
+    trend = ema100_trend(ind)
+    price = ind.price_array[-1] if ind and ind.price_array else None
+    if action == "buy":
+        return trend == 1 and price and price > ind.ema_array[-1]
+    if action == "sell":
+        return trend == -1 and price and price < ind.ema_array[-1]
+    return False
+
 @app.post("/gpt/manage")
 async def gpt_manage(wrapper: TradeWrapper):
     trade = wrapper.data
@@ -192,41 +211,37 @@ async def gpt_manage(wrapper: TradeWrapper):
             "\n---\n"
         )
 
-    # === STRONG CROSSOVER NOTE ===
-    strong_cross_note = ""
-    if cross_signal in {"ema_over_lwma", "ema_under_lwma"}:
-        strong_cross_note = (
-            "**NOTE:** The EMA/LWMA crossover on this bar is historically a strong standalone entry. "
-            "Still, all confluence rules must be strictly satisfied below.\n"
-        )
-
-    # === NEW STRICT PROMPT ===
-    prompt = f"""{recovery_note}{strong_cross_note}
+    # === STRICT PROMPT, EMA 100 ONLY ===
+    prompt = f"""{recovery_note}
 You are a decisive, disciplined prop firm trading assistant. DO NOT be lazy or generic; always justify every action using live indicator values and current price context. NEVER reuse generic logic.
 If you do not explicitly list at least {(5 if in_recovery_mode else 4)} unique categories (Trend, Momentum, Volatility, Volume, Structure, ADX) in your reason as in the example, your action will be set to 'hold' and the trade will not be taken.
 Never say just 'multiple confluences' or generic logic. List each category and which indicator fills it, every time.
 
 CONFLUENCE LOGIC:
 - There are **6 unique categories**: 
-  1. TREND: (choose one, e.g. EMA/LWMA cross OR Ichimoku OR SMMA—but only one counts as Trend)
+  1. TREND: (EMA 100 on main timeframe only. For bonus, see below)
   2. MOMENTUM: (MACD OR RSI OR Stochastic—only one counts as Momentum)
   3. VOLATILITY: (Bollinger Bands OR ATR—only one counts as Volatility)
   4. VOLUME: (MFI OR volume spike—only one counts as Volume)
   5. STRUCTURE: (Key support/resistance OR Fibonacci alignment OR reversal candle—only one counts as Structure)
   6. ADX: (ADX > 20 and direction—only one counts as ADX)
 - When justifying an entry, you **must explicitly state which categories are satisfied**, e.g.: 
-  `Confluences: Trend (EMA cross), Momentum (MACD), Volatility (BB), Structure (Fib), ADX (trend > 20).`
+  `Confluences: Trend (EMA100 up), Momentum (MACD), Volatility (BB), Structure (Fib), ADX (trend > 20).`
 - **Only one indicator per category can count towards the confluence total.**
 - If more than one indicator in the same category aligns, only count the strongest or most significant.
 - When replying, provide a line listing the *categories* being counted. Do not “double-count” indicators in the same category.
 - Do NOT claim more than 6 confluences; do not count two momentum or two trend indicators as separate.
 
+ABSOLUTE TREND RULE:
+- You are FORBIDDEN from recommending a buy unless the EMA 100 on the main timeframe is sloping up and price is above EMA 100.
+- You are FORBIDDEN from recommending a sell unless the EMA 100 on the main timeframe is sloping down and price is below EMA 100.
+- If EMA 100 on the main timeframe does NOT confirm the direction, your action must be "hold" and you must state this in your reason.
+- If EMA 100 on the main, H1, and H4 timeframes ALL align with your direction (all sloping up for buy, or all down for sell), ADD +1 bonus to your confidence score and clearly state this in your reason.
+- Only EMA 100 is used for trend on any timeframe. Do not use SMMA or any other MA for trend filtering.
+
 ENTRY RULES:
 - Only take a trade if at least {(5 if in_recovery_mode else 4)} different categories align (not just indicators).
 - In recovery mode, at least 5 out of 6 categories must align, per above.
-- If ALL 3 (main, H1, H4) SMMA trends agree (strongest trend), add +1 confidence to the decision.
-- If price is close to, hugging, or crossing SMMA, reduce confidence and consider holding or warning of possible trend reversal.
-- Always mention SMMA status for every signal and justify your confidence.
 
 RISK/SESSION GUARDS:
 - DO NOT move SL if SL is already at breakeven (SL == entry price).
@@ -243,14 +258,14 @@ For EVERY response, including "hold" and "close", you must ALWAYS include a full
 - List every category (Trend, Momentum, Volatility, Volume, Structure, ADX).  
 - For each, state the present indicator, value, and if it confirms, is neutral, or conflicts.  
 - Example (hold):  
-  Confluences: Trend (conflict with SMMA), Momentum (MACD positive), Volatility (neutral), Volume (low), Structure (neutral), ADX (weak).  
+  Confluences: Trend (EMA 100 down), Momentum (MACD positive), Volatility (neutral), Volume (low), Structure (neutral), ADX (weak).  
 - After the confluences line, clearly explain why action is "hold" (e.g. "Not enough categories align.")  
 - **Never skip the confluences line, even for "hold" or session filter.**
 
 EXAMPLES (JSON only, strictly follow this style):
 {{
   "action": "buy",
-  "reason": "Confluences: Trend (EMA/LWMA cross up), Momentum (MACD positive), Volatility (BB squeeze breakout), Volume (MFI strong), Structure (Fibonacci support), ADX (trend > 20). SMMA is sloping up, confirming trend.",
+  "reason": "Confluences: Trend (EMA 100 up), Momentum (MACD positive), Volatility (BB squeeze breakout), Volume (MFI strong), Structure (Fibonacci support), ADX (trend > 20). EMA 100 on all timeframes confirms trend. Confidence +1.",
   "confidence": 9,
   "lot": 2,
   "new_sl": 2290,
@@ -258,12 +273,12 @@ EXAMPLES (JSON only, strictly follow this style):
 }}
 {{
   "action": "hold",
-  "reason": "Confluences: Trend (conflict with SMMA), Momentum (MACD positive), Volatility (neutral), Volume (low), Structure (neutral), ADX (weak). Not enough categories align.",
+  "reason": "Confluences: Trend (EMA 100 flat), Momentum (MACD positive), Volatility (neutral), Volume (low), Structure (neutral), ADX (weak). Not enough categories align.",
   "confidence": 2
 }}
 {{
   "action": "close",
-  "reason": "Confluences: Trend (SMMA turning down), Momentum (MACD), Structure (support break), Volatility (BB expansion), Volume (neutral), ADX (strong). Trend reversal: SMMA has turned down and price crossed SMMA. 15m MACD down, price broke below Ichimoku cloud, major SR break.",
+  "reason": "Confluences: Trend (EMA 100 turning down), Momentum (MACD), Structure (support break), Volatility (BB expansion), Volume (neutral), ADX (strong). Trend reversal: EMA 100 has turned down and price crossed below. 15m MACD down, price broke below Ichimoku cloud, major SR break.",
   "confidence": 9
 }}
 
@@ -340,6 +355,18 @@ Indicators (1H): {ind_1h.dict()}
                     action["reason"] += " | SL at breakeven, not allowed to move."
                     action["new_sl"] = pos.sl
 
+        # === EMA 100 Main Trend Enforcement & Bonus Confidence ===
+        if action.get("action") in {"buy", "sell"}:
+            if not ema100_confirms(ind_5m, action["action"]):
+                action["action"] = "hold"
+                action["reason"] += " | EMA 100 on main timeframe does not confirm trade."
+            else:
+                agrees_h1 = ema100_trend(ind_15m) == (1 if action["action"] == "buy" else -1)
+                agrees_h4 = ema100_trend(ind_1h) == (1 if action["action"] == "buy" else -1)
+                if agrees_h1 and agrees_h4:
+                    action["confidence"] = int(action.get("confidence", 0)) + 1
+                    action["reason"] += " | EMA 100 on all timeframes confirms trend. Confidence +1."
+
         # Friday/weekend/session guards
         if is_friday_5pm_or_later():
             if pos and pos.pnl and pos.pnl > 0 and action.get("action") not in {"close", "hold"}:
@@ -379,5 +406,5 @@ Indicators (1H): {ind_1h.dict()}
 @app.get("/")
 async def root():
     return {
-        "message": "SmartGPT EA SCALPER (GPT-4o, strict confluence, strict confidence, SL/TP enforcement, prop/session safety, recovery mode, anti-lazy JSON/logic enforcement, EMA/LWMA strong cross logic highlighted, everything fully explained every response)."
+        "message": "SmartGPT EA SCALPER (GPT-4o, EMA 100 main TF trend enforcement, bonus for H1/H4 alignment, strict confluence, SL/TP enforcement, prop/session safety, recovery mode, anti-lazy JSON/logic enforcement)."
     }
