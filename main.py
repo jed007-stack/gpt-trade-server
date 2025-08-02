@@ -357,9 +357,16 @@ Indicators (1H): {ind_1h.dict()}
 
         # === EMA 100 Main Trend Enforcement & Bonus Confidence ===
         if action.get("action") in {"buy", "sell"}:
+            main_ema_trend = ema100_trend(ind_5m)
+            other_categories = {"momentum", "volatility", "volume", "structure", "adx"}
+            enough_other = other_categories.issubset(claimed)
+            # If normal EMA100 trend check fails:
             if not ema100_confirms(ind_5m, action["action"]):
-                action["action"] = "hold"
-                action["reason"] += " | EMA 100 on main timeframe does not confirm trade."
+                if main_ema_trend == 0 and enough_other and conf >= 8:
+                    action["reason"] += " | EMA 100 is flat, but all other major indicators are strongly aligned. Allowing trade."
+                else:
+                    action["action"] = "hold"
+                    action["reason"] += " | EMA 100 on main timeframe does not confirm trade."
             else:
                 agrees_h1 = ema100_trend(ind_15m) == (1 if action["action"] == "buy" else -1)
                 agrees_h4 = ema100_trend(ind_1h) == (1 if action["action"] == "buy" else -1)
@@ -406,5 +413,5 @@ Indicators (1H): {ind_1h.dict()}
 @app.get("/")
 async def root():
     return {
-        "message": "SmartGPT EA SCALPER (GPT-4o, EMA 100 main TF trend enforcement, bonus for H1/H4 alignment, strict confluence, SL/TP enforcement, prop/session safety, recovery mode, anti-lazy JSON/logic enforcement)."
+        "message": "SmartGPT EA SCALPER (GPT-4o, EMA 100 main TF trend enforcement w/ flat override, bonus for H1/H4 alignment, strict confluence, SL/TP enforcement, prop/session safety, recovery mode, anti-lazy JSON/logic enforcement)."
     }
