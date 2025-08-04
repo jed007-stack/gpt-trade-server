@@ -355,15 +355,15 @@ Indicators (1H): {ind_1h.dict()}
                     action["reason"] += " | SL at breakeven, not allowed to move."
                     action["new_sl"] = pos.sl
 
-        # === EMA 100 Main Trend Enforcement & Bonus Confidence ===
+        # === EMA 100 Main Trend Enforcement & God Mode Flat Override ===
         if action.get("action") in {"buy", "sell"}:
             main_ema_trend = ema100_trend(ind_5m)
-            other_categories = {"momentum", "volatility", "volume", "structure", "adx"}
-            enough_other = other_categories.issubset(claimed)
-            # If normal EMA100 trend check fails:
+            min_cats = 5 if in_recovery_mode else 4
+            # Normal EMA100 filter
             if not ema100_confirms(ind_5m, action["action"]):
-                if main_ema_trend == 0 and enough_other and conf >= 8:
-                    action["reason"] += " | EMA 100 is flat, but all other major indicators are strongly aligned. Allowing trade."
+                # FLAT OVERRIDE: Allow trade if EMA100 is flat, confidence high, enough confluences
+                if main_ema_trend == 0 and cat_count >= min_cats and conf >= 8:
+                    action["reason"] += " | EMA 100 is flat, but high-confidence, multi-confluence setup. Allowing override trade."
                 else:
                     action["action"] = "hold"
                     action["reason"] += " | EMA 100 on main timeframe does not confirm trade."
