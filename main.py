@@ -40,7 +40,7 @@ class Indicators(BaseModel):
     macd: Optional[MACD] = None
     ema: Optional[float] = None
     ema_period: Optional[int] = None
-    ema_array: Optional[List[float]] = None  # Add for EMA100 trend checks
+    ema_array: Optional[List[float]] = None
     lwma: Optional[float] = None
     lwma_period: Optional[int] = None
     adx: Optional[float] = None
@@ -153,6 +153,11 @@ def ema100_trend(ind):
     elif curr_ema < prev_ema:
         return -1
     return 0
+
+def ema100_slope(ind):
+    if not ind or not ind.ema_array or len(ind.ema_array) < 2:
+        return 0
+    return ind.ema_array[-1] - ind.ema_array[-2]
 
 def ema100_confirms(ind, action):
     trend = ema100_trend(ind)
@@ -355,18 +360,24 @@ Indicators (1H): {ind_1h.dict()}
                     action["reason"] += " | SL at breakeven, not allowed to move."
                     action["new_sl"] = pos.sl
 
-        # === EMA 100 Main Trend Enforcement & God Mode Flat Override ===
+        # === EMA 100 Main Trend Enforcement & Flexible God Mode Override ===
         if action.get("action") in {"buy", "sell"}:
             main_ema_trend = ema100_trend(ind_5m)
+            main_ema_slope = ema100_slope(ind_5m)
             min_cats = 5 if in_recovery_mode else 4
             # Normal EMA100 filter
             if not ema100_confirms(ind_5m, action["action"]):
-                # FLAT OVERRIDE: Allow trade if EMA100 is flat, confidence high, enough confluences
-                if main_ema_trend == 0 and cat_count >= min_cats and conf >= 8:
-                    action["reason"] += " | EMA 100 is flat, but high-confidence, multi-confluence setup. Allowing override trade."
+                # Allow if not strongly against: "strong" = slope < -0.2 (for buys) or > +0.2 (for sells)
+                trend_block = False
+                if action["action"] == "buy" and main_ema_trend == -1 and main_ema_slope < -0.2:
+                    trend_block = True
+                elif action["action"] == "sell" and main_ema_trend == 1 and main_ema_slope > 0.2:
+                    trend_block = True
+                if not trend_block and cat_count >= min_cats and conf >= 8:
+                    action["reason"] += " | EMA 100 not strongly against—God Mode override triggered: confidence and confluences allow entry."
                 else:
                     action["action"] = "hold"
-                    action["reason"] += " | EMA 100 on main timeframe does not confirm trade."
+                    action["reason"] += " | EMA 100 on main timeframe strongly opposes trade."
             else:
                 agrees_h1 = ema100_trend(ind_15m) == (1 if action["action"] == "buy" else -1)
                 agrees_h4 = ema100_trend(ind_1h) == (1 if action["action"] == "buy" else -1)
@@ -413,5 +424,5 @@ Indicators (1H): {ind_1h.dict()}
 @app.get("/")
 async def root():
     return {
-        "message": "SmartGPT EA SCALPER (GPT-4o, EMA 100 main TF trend enforcement w/ flat override, bonus for H1/H4 alignment, strict confluence, SL/TP enforcement, prop/session safety, recovery mode, anti-lazy JSON/logic enforcement)."
+        "message": "SmartGPT EA SCALPER (GPT-4o, EMA 100 main TF trend enforcement w/ flexible override, bonus for H1/H4 alignment, strict confluence, SL/TP enforcement, prop/session safety, recovery mode, anti-lazy JSON/logic enforcement)."
     }
