@@ -125,7 +125,11 @@ def uk_time_now():
 
 def is_between_uk_time(start_h, end_h):
     now = uk_time_now().time()
-    return time(start_h, 0) <= now < time(end_h, 0)
+    # Handles overnight windows like 19–7
+    if start_h < end_h:
+        return time(start_h, 0) <= now < time(end_h, 0)
+    else:
+        return now >= time(start_h, 0) or now < time(end_h, 0)
 
 def is_friday_5pm_or_later():
     now = uk_time_now()
@@ -385,6 +389,12 @@ Indicators (1H): {ind_1h.dict()}
                     action["confidence"] = int(action.get("confidence", 0)) + 1
                     action["reason"] += " | EMA 100 on all timeframes confirms trend. Confidence +1."
 
+        # Block new trades between 19:00 and 07:00 UK time (overnight)
+        if action.get("action") in {"buy", "sell"}:
+            if is_between_uk_time(19, 7):
+                action["action"] = "hold"
+                action["reason"] += " | No new trades between 19:00 and 07:00 UK time."
+
         # Friday/weekend/session guards
         if is_friday_5pm_or_later():
             if pos and pos.pnl and pos.pnl > 0 and action.get("action") not in {"close", "hold"}:
@@ -424,5 +434,5 @@ Indicators (1H): {ind_1h.dict()}
 @app.get("/")
 async def root():
     return {
-        "message": "SmartGPT EA SCALPER (GPT-4o, EMA 100 main TF trend enforcement w/ flexible override, bonus for H1/H4 alignment, strict confluence, SL/TP enforcement, prop/session safety, recovery mode, anti-lazy JSON/logic enforcement)."
+        "message": "SmartGPT EA SCALPER (GPT-4o, EMA 100 main TF trend enforcement w/ flexible override, bonus for H1/H4 alignment, strict confluence, SL/TP enforcement, prop/session/overnight safety, recovery mode, anti-lazy JSON/logic enforcement)."
     }
