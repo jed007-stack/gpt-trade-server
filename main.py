@@ -202,7 +202,7 @@ def infer_tick_tol(ind: Indicators) -> float:
         return 1e-4
     s = f"{price:.10f}".rstrip("0")
     decimals = len(s.split(".")[1]) if "." in s else 2
-    return 10 ** (-(decimals - 1))  # a bit looser than 1 tick
+    return 10 ** (-(decimals - 1))  # slightly looser than 1 tick
 
 def atr_norm_slope(slope: float, ind: Indicators) -> float:
     atr = ind.atr if ind and ind.atr else None
@@ -283,42 +283,40 @@ async def gpt_manage(wrapper: TradeWrapper):
             "List the exact categories used (Trend, Momentum, Volatility, Volume, Structure, ADX).\n---\n"
         )
 
-    # Prompt — ask for rich, structured JSON
+    # Prompt — ask for rich, structured JSON (super-detailed)
     prompt = f"""{recovery_note}
-You are a decisive, disciplined prop-firm trading assistant. Reply in STRICT JSON matching the schema shown below.
+You are an elite, disciplined prop-firm trading assistant. Reply in STRICT JSON.
 
-GOAL:
-- Always explain: what you HAVE now (by category), what you're MISSING, and what you WOULD NEED to take a trade (the minimal missing conditions).
-- If you recommend HOLD, specify disqualifiers and the exact missing items.
-- If you recommend CLOSE, justify using categories or session/policy reasons.
-- If you recommend BUY/SELL, include 'new_sl' and 'new_tp', and detail SL/TP rationale (swing/ATR/Fib/SR).
+OBJECTIVE:
+- Detail EXACTLY what you HAVE (by category), what is MISSING, and the MINIMAL things you would NEED to enter.
+- If HOLD: list disqualifiers and the missing items. If CLOSE: justify via categories or policy/session. If BUY/SELL: include numeric 'new_sl' & 'new_tp' and explain SL/TP logic.
 
-CATEGORIES (max 1 indicator per category):
-1) TREND: EMA {ema_period} on main TF ONLY (mandatory for entries)
-2) MOMENTUM: MACD or RSI or Stochastic
-3) VOLATILITY: Bollinger Bands or ATR
-4) VOLUME: MFI or clear volume spike
-5) STRUCTURE: Support/Resistance OR Fibonacci alignment OR reversal candle
-6) ADX: ADX > 20 and direction
+CATEGORIES (MAX 1 per category):
+1) TREND: EMA {ema_period} on MAIN TF ONLY (mandatory for entries)
+2) MOMENTUM: MACD OR RSI OR Stochastic
+3) VOLATILITY: Bollinger Bands OR ATR
+4) VOLUME: MFI OR volume spike
+5) STRUCTURE: S/R OR Fibonacci OR reversal candle
+6) ADX: ADX > 20 + direction
 
-RULES:
-- Confluences line is mandatory, every time: "Confluences: Trend (...), Momentum (...), Volatility (...), Volume (...), Structure (...), ADX (...)."
-- ABSOLUTE TREND RULE: BUY only if EMA {ema_period} slopes up AND price>EMA; SELL only if EMA {ema_period} slopes down AND price<EMA.
-- GOD-MODE: Allowed only if EMA is NOT strongly against. If strongly opposite, HOLD. If used, set "god_mode_used": true and explain.
-- Entries require at least {(5 if in_recovery_mode else 4)} unique categories aligned and confidence ≥ {(8 if in_recovery_mode else 6)}.
-- No new trades 19:00–07:00 UK, and none after 17:00 UK Friday. If blocked by session, set "session_block": true and HOLD unless closing profits.
+HARD RULES:
+- Confluences line is mandatory: "Confluences: Trend (...), Momentum (...), Volatility (...), Volume (...), Structure (...), ADX (...)."
+- ABSOLUTE TREND: BUY only if EMA {ema_period} slopes up AND price>EMA; SELL only if EMA {ema_period} slopes down AND price<EMA.
+- GOD-MODE: Allowed only if EMA is NOT strongly against. If strongly opposite, HOLD. If used, set god_mode_used=true and explain why it’s acceptable.
+- Entries need at least {(5 if in_recovery_mode else 4)} unique categories and confidence ≥ {(8 if in_recovery_mode else 6)}.
+- No new trades 19:00–07:00 UK and after 17:00 UK Friday (mark session_block=true and HOLD unless closing profits).
 
 SL/TP:
-- SL beyond last swing or ≥ 1xATR (state which).
-- TP ≥ 2xSL or next S/R/Fib level (state which).
-- Return numeric new_sl/new_tp for entries.
+- SL beyond last swing or ≥1xATR (state which, with numbers).
+- TP ≥2xSL or at next S/R/Fib (state which, with numbers).
+- Always return numeric new_sl and new_tp for entries.
 
 SLOPES ({tf_label_main}/{tf_label_tf2}/{tf_label_tf3}):
 - {tf_label_main} EMA {ema_period}: {main_slope_txt}
 - {tf_label_tf2}  EMA {ema_period}: {tf2_slope_txt}
 - {tf_label_tf3}  EMA {ema_period}: {tf3_slope_txt}
 
-CONTEXT TO USE:
+CONTEXT:
 - Indicators (main): {ind_main.dict()}
 - Indicators (tf2): {ind_tf2.dict()}
 - Indicators (tf3): {ind_tf3.dict()}
@@ -330,17 +328,20 @@ CONTEXT TO USE:
 Return JSON EXACTLY like:
 {{
   "action": "buy|sell|hold|close",
-  "reason": "Confluences: Trend (...), Momentum (...), Volatility (...), Volume (...), Structure (...), ADX (...). Then explanation.",
+  "reason": "Confluences: Trend (...), Momentum (...), Volatility (...), Volume (...), Structure (...), ADX (...). Then full explanation.",
   "confidence": 0-10,
   "lot": 1,
   "new_sl": 0.0,
   "new_tp": 0.0,
   "categories": ["trend","momentum","volatility","volume","structure","adx"],
-  "missing_categories": ["volume","structure"],                # what’s missing RIGHT NOW
-  "needed_to_enter": ["ADX>20","price above EMA"],             # exact minimal requirements you want
-  "disqualifiers": ["EMA {ema_period} flat", "Session block"], # hard blockers if any
+
+  "missing_categories": ["volume","structure"],            # what’s missing RIGHT NOW
+  "needed_to_enter": ["ADX>20","price above EMA"],         # minimal requirements you want
+  "disqualifiers": ["EMA {ema_period} flat","Session block"],
+
   "session_block": false,
   "god_mode_used": false,
+
   "ema_context": {{
     "period": {ema_period},
     "price_vs_ema": "above|below|near",
@@ -364,7 +365,7 @@ Return JSON EXACTLY like:
                 {"role": "user", "content": prompt}
             ],
             temperature=0,
-            max_tokens=900,
+            max_completion_tokens=900,
             response_format={"type": "json_object"}
         )
         decision = chat.choices[0].message.content.strip()
@@ -416,10 +417,8 @@ Return JSON EXACTLY like:
         # God-mode vs EMA rule (ATR-normalized)
         if action.get("action") in {"buy", "sell"}:
             main_trend = ema_trend(ind_main)
-            main_slope_val = main_slope
             norm = norm_main
-            # threshold in ATR units (tunable)
-            strong_thresh = 0.02  # ~2% of ATR per bar change; adjust if needed
+            strong_thresh = 0.02  # ATR-normalized threshold; tune per symbol if needed
             trend_block = False
             if not ema_confirms(ind_main, action["action"]):
                 if action["action"] == "buy" and (main_trend == -1 and norm < -strong_thresh):
@@ -505,5 +504,5 @@ Return JSON EXACTLY like:
 @app.get("/")
 async def root():
     return {
-        "message": "SmartGPT EA SCALPER — tf2/tf3, rich explanations (what’s missing/needed), ATR-normalized EMA guard, 19:00 UK profit close, strict confluences, God-mode (soft), session guards, recovery mode."
+        "message": "SmartGPT EA SCALPER — GPT-5, tf2/tf3, rich reasoning (what’s missing/needed), ATR-normalized EMA guard, 19:00 UK profit close, strict confluences, God-mode (soft), session guards, recovery mode."
     }
