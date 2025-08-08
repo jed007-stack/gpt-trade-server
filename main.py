@@ -14,10 +14,12 @@ import pytz
 api_key = os.getenv("OPENAI_API_KEY")
 if not api_key:
     raise RuntimeError("OPENAI_API_KEY environment variable is not set")
+
 openai_client = openai.OpenAI(api_key=api_key)
 
 app = FastAPI()
 logging.basicConfig(level=logging.INFO)
+
 
 # === Data Models ===
 class MACD(BaseModel):
@@ -79,31 +81,49 @@ class Timeframes(BaseModel):
     tf2: Optional[List[Candle]] = None
     tf3: Optional[List[Candle]] = None
 
+class Regime(BaseModel):
+    label: Optional[str] = None      # "trend" | "range" | "breakout"
+    bb_width: Optional[float] = None
+    slope_pct: Optional[float] = None
+    adx: Optional[float] = None
+
 class TradeData(BaseModel):
     symbol: str
     timeframe: str
-    update_type: Optional[str] = None
+    update_type: Optional[str] = None       # e.g., "ema_over_lwma", "session_check_19"
     cross_signal: Optional[str] = None
     cross_meaning: Optional[str] = None
-    indicators: Optional[Indicators] = None
-    tf2_indicators: Optional[Indicators] = None
-    tf3_indicators: Optional[Indicators] = None
+
+    indicators: Optional[Indicators] = None       # main TF
+    tf2_indicators: Optional[Indicators] = None   # tf2
+    tf3_indicators: Optional[Indicators] = None   # tf3
     timeframes: Optional[Timeframes] = None
-    tf_names: Optional[Dict[str, str]] = None
+    tf_names: Optional[Dict[str, str]] = None     # {"main":"M5","tf2":"M15","tf3":"H1"}
+
     position: Optional[Position] = None
     account: Optional[Account] = None
+
+    # Session/news & recovery
     news_override: Optional[bool] = False
-    live_candle1: Optional[Candle] = None
-    live_candle2: Optional[Candle] = None
     last_trade_was_loss: Optional[bool] = False
     unrecovered_loss: Optional[float] = 0.0
+
+    # Crossover signal from EA
     strong_crossover: Optional[bool] = False
+
+    # NEW: microstructure context from EA
+    regime: Optional[Regime] = None
+    spread_pips: Optional[float] = None
+    spread_to_sl: Optional[float] = None
+    require_sr_tp: Optional[bool] = None
 
 class TradeWrapper(BaseModel):
     data: TradeData
 
+
 # === Helpers ===
 def flatten_action(decision):
+    """Accept dict OR string JSON; return a dict with at least action/reason/confidence."""
     if isinstance(decision, dict) and "action" in decision:
         return decision
     if isinstance(decision, str):
@@ -123,6 +143,25 @@ def flatten_action(decision):
         except Exception:
             pass
     return {"action": "hold", "reason": "Could not decode action.", "confidence": 0}
+
+def extract_json_object(s: str):
+    """Best-effort salvage of a JSON object from a messy string."""
+    if not isinstance(s, str):
+        return None
+    cleaned = re.sub(r"```(?:json|JSON)?", "", s).strip()
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        return None
+    chunk = cleaned[start:end+1]
+    try:
+        return json.loads(chunk)
+    except Exception:
+        try:
+            no_trailing_commas = re.sub(r",\s*([}\]])", r"\1", chunk)
+            return json.loads(no_trailing_commas)
+        except Exception:
+            return None
 
 def uk_time_now():
     utc_now = datetime.utcnow()
@@ -209,6 +248,8 @@ def atr_norm_slope(slope: float, ind: Indicators) -> float:
     ref = abs(ref) if ref else 1.0
     return slope / ref
 
+
+# === Core endpoint ===
 @app.post("/gpt/manage")
 async def gpt_manage(wrapper: TradeWrapper):
     trade = wrapper.data
@@ -217,9 +258,11 @@ async def gpt_manage(wrapper: TradeWrapper):
     ind_tf3  = trade.tf3_indicators or Indicators()
     pos = trade.position
     acc = trade.account or Account(balance=10000, equity=10000, margin=None)
+
     candles_main = (trade.timeframes.main or [])[-5:] if trade.timeframes and trade.timeframes.main else []
     candles_tf2  = (trade.timeframes.tf2  or [])[-5:] if trade.timeframes and trade.timeframes.tf2  else []
     candles_tf3  = (trade.timeframes.tf3  or [])[-5:] if trade.timeframes and trade.timeframes.tf3  else []
+
     cross_signal = trade.cross_signal or "none"
     cross_meaning = trade.cross_meaning or "none"
 
@@ -233,9 +276,15 @@ async def gpt_manage(wrapper: TradeWrapper):
     tf3_slope  = ema_slope(ind_tf3);  tf3_slope_txt  = ema_slope_desc(tf3_slope)
 
     norm_main = atr_norm_slope(main_slope, ind_main)
+    regime = trade.regime or Regime()
+    spread_to_sl = trade.spread_to_sl if trade.spread_to_sl is not None else 0.0
+    require_sr_tp = bool(trade.require_sr_tp)
+
     in_recovery_mode = bool(trade.last_trade_was_loss or (trade.unrecovered_loss or 0.0) > 0.0)
 
     logging.info(f"🔻 RAW PAYLOAD:\n{wrapper.json()}\n---")
+
+    # News override
     if trade.news_override:
         return JSONResponse(content={
             "action": "hold",
@@ -248,10 +297,11 @@ async def gpt_manage(wrapper: TradeWrapper):
             "god_mode_used": False,
             "missing_categories": ["trend","momentum","volatility","volume","structure","adx"],
             "needed_to_enter": ["Wait for news window to end."],
-            "disqualifiers": ["News override"]
+            "disqualifiers": ["News override"],
+            "policy": "news_conflict"
         })
 
-    # 7pm UK policy
+    # 19:00 UK policy (EA can ping us; we also self-guard if called later)
     if trade.update_type == "session_check_19" or is_uk_at_or_after(19):
         if pos and (pos.pnl or 0.0) > 0.0:
             return JSONResponse(content={
@@ -265,7 +315,8 @@ async def gpt_manage(wrapper: TradeWrapper):
                 "god_mode_used": False,
                 "missing_categories": [],
                 "needed_to_enter": [],
-                "disqualifiers": ["Session policy exit"]
+                "disqualifiers": ["Session policy exit"],
+                "policy": "session_exit"
             })
 
     # Recovery banner
@@ -277,18 +328,23 @@ async def gpt_manage(wrapper: TradeWrapper):
             "List the exact categories used.\n---\n"
         )
 
-    # Prompt — maximize GPT-5’s “abilities” without chain-of-thought
+    # === Prompt (rich; no chain-of-thought leakage; push model to be explicit) ===
     prompt = f"""{recovery_note}
-You are an elite, disciplined prop-firm trading assistant. Reply in STRICT JSON only.
+You are a disciplined prop-firm scalping assistant. Reply in STRICT JSON only.
+
+EXTRA CONTEXT FROM EA:
+- regime: {regime.dict()}   # label in ["trend","range","breakout"]
+- spread_to_sl: {spread_to_sl:.3f}
+- require_sr_tp: {require_sr_tp}  # if True, TP must reference SR/Fib, not just 2R
 
 USE ALL CAPABILITIES:
-- Numeric precision: quote current indicator values you use (MACD numbers, RSI, MFI, ADX, BB %, ATR multiples, EMA slope values).
-- Evidence audit: explicitly list what data you used vs. ignored (with reasons).
-- Counterfactuals: list the minimal changes that would flip HOLD→ENTRY (e.g., "ADX>22 and price retest 100EMA as support").
-- Session awareness: apply 19:00–07:00 UK and Friday 17:00+ rules.
-- Risk engineering: state SL method (swing/ATR) and TP method (≥2R or SR/Fib), with numeric examples.
+- Quote numeric values you rely on (MACD, RSI, MFI, ADX, BB width %, ATR multiples, EMA slopes).
+- Evidence audit: list data you used vs. ignored (with reason).
+- Counterfactuals: minimal changes that would flip HOLD→ENTRY (e.g., "ADX>22 and price retests EMA as support").
+- Session rules: honor 19:00–07:00 UK and Friday 17:00+ (session_block=true).
+- Risk: state SL method (swing/ATR) and TP method (≥2R OR SR/Fib per require_sr_tp), with numbers.
 
-CATEGORIES (max 1 per category):
+CATEGORIES (max 1 per cat):
 1) TREND: EMA {ema_period} on MAIN TF ONLY (mandatory for entries)
 2) MOMENTUM: MACD OR RSI OR Stochastic
 3) VOLATILITY: Bollinger Bands OR ATR
@@ -300,12 +356,12 @@ HARD RULES:
 - Confluences line is mandatory: "Confluences: Trend (...), Momentum (...), Volatility (...), Volume (...), Structure (...), ADX (...)."
 - ABSOLUTE TREND: BUY only if EMA {ema_period} slopes up AND price>EMA; SELL only if slopes down AND price<EMA.
 - GOD-MODE: Allowed only if EMA is NOT strongly against. If used, set god_mode_used=true and justify.
-- Entries need at least {(5 if in_recovery_mode else 4)} unique categories and confidence ≥ {(8 if in_recovery_mode else 6)}.
+- Entries need at least {"5" if in_recovery_mode else "4"} categories and confidence ≥ {"8" if in_recovery_mode else "6"}.
 - No new trades 19:00–07:00 UK and after 17:00 UK Friday (set session_block=true and HOLD unless closing profits).
 
 SL/TP:
 - SL beyond last swing or ≥1xATR (state which, with numbers).
-- TP ≥2xSL or next S/R/Fib (state which, with numbers).
+- TP ≥2xSL or next S/R/Fib (state which, with numbers). If require_sr_tp=true, TP must be SR/Fib-based.
 - Always return numeric new_sl/new_tp for entries.
 
 SLOPES ({tf_label_main}/{tf_label_tf2}/{tf_label_tf3}):
@@ -349,32 +405,36 @@ Return JSON EXACTLY like:
   "fib_summary": {{"high": 0.0, "low": 0.0, "active_levels": ["38.2","61.8"]}},
   "volatility_context": {{"atr": 0.0, "bb_state": "squeeze|expansion|neutral"}},
   "volume_context": {{"mfi": 0.0, "state": "low|normal|high"}},
+
   "risk_notes": "1R=..., SL at swing low + ATR buffer...",
   "policy": "none|session_exit|friday_exit|news_conflict",
 
   "model_self_audit": {{
     "data_used": ["ema_array[-2:]", "price_array[-1]", "macd.main", "mfi", "adx"],
-    "data_ignored": ["ichimoku (out of scope for categories)"],
+    "data_ignored": ["ichimoku (not part of confluence categories)"],
     "confidence_rationale": "why confidence=X given the evidence"
   }}
 }}
 """
 
     try:
+        # gpt-5: do NOT set temperature; use max_completion_tokens (not max_tokens)
         chat = openai_client.chat.completions.create(
             model="gpt-5",
             messages=[
                 {"role": "system", "content": "You are an elite, disciplined, risk-aware SCALPER assistant. Reply ONLY in strict JSON. Include 'new_sl' and 'new_tp' for buy/sell. Never include analysis outside the JSON fields requested."},
                 {"role": "user", "content": prompt}
             ],
-            # no temperature (GPT-5 only supports default)
             max_completion_tokens=900,
             response_format={"type": "json_object"}
         )
-        decision = chat.choices[0].message.content.strip()
+
+        # Primary path: JSON content (since response_format=json_object)
+        raw = chat.choices[0].message.content or ""
+        decision = extract_json_object(raw) or {"raw": raw}
         action = flatten_action(decision)
 
-        # Collect categories from JSON + from reason line
+        # Merge categories from explicit list + from the Confluences line
         claimed = set()
         if isinstance(action.get("categories"), list):
             claimed |= {str(x).lower() for x in action["categories"]}
@@ -388,7 +448,10 @@ Return JSON EXACTLY like:
 
         # Confluence line enforcement for entries
         if action.get("action") in {"buy", "sell"}:
-            if "confluences:" not in action.get("reason", "").lower() or len(claimed) < min_cats:
+            if "confluences:" not in (action.get("reason", "").lower()):
+                action["action"] = "hold"
+                action["reason"] = (action.get("reason","") + " | Missing mandatory Confluences line.").strip()
+            if len(claimed) < min_cats:
                 action["action"] = "hold"
                 action["reason"] = (action.get("reason","") + f" | Confluence requirement not met ({len(claimed)}/{min_cats}).").strip()
 
@@ -400,8 +463,12 @@ Return JSON EXACTLY like:
             if conf < min_conf:
                 action["action"] = "hold"
                 action["reason"] += f" | Confidence too low ({conf}<{min_conf})."
+            # If EA flagged require_sr_tp (big spread vs SL), insist TP rationale is SR/Fib
+            if require_sr_tp and "structure" not in claimed:
+                action["action"] = "hold"
+                action["reason"] += " | High spread/SL: TP must be SR/Fib-based (Structure)."
 
-        # Session guards
+        # Session guards (no new entries overnight / late Friday)
         if action.get("action") in {"buy", "sell"} and is_between_uk_time(19, 7):
             action["action"] = "hold"
             action["reason"] += " | No new trades between 19:00 and 07:00 UK."
@@ -420,13 +487,12 @@ Return JSON EXACTLY like:
         # God-mode vs EMA rule (ATR-normalized)
         if action.get("action") in {"buy", "sell"}:
             main_trend = ema_trend(ind_main)
-            norm = norm_main
-            strong_thresh = 0.02
+            strong_thresh = 0.02  # tunable; ATR-normalized slope threshold for "strongly against"
             trend_block = False
             if not ema_confirms(ind_main, action["action"]):
-                if action["action"] == "buy" and (main_trend == -1 and norm < -strong_thresh):
+                if action["action"] == "buy" and (main_trend == -1 and norm_main < -strong_thresh):
                     trend_block = True
-                if action["action"] == "sell" and (main_trend == 1 and norm > strong_thresh):
+                if action["action"] == "sell" and (main_trend == 1 and norm_main > strong_thresh):
                     trend_block = True
             if trend_block:
                 action["action"] = "hold"
@@ -442,21 +508,21 @@ Return JSON EXACTLY like:
                     action["confidence"] = int(action.get("confidence", 0)) + 1
                     action["reason"] += " | EMA alignment across main/tf2/tf3. Confidence +1."
 
-        # Pre-22:00 UK profit lock preference
+        # Pre-22:00 UK: prefer locking profit
         if pos and (pos.pnl or 0.0) > 0 and is_between_uk_time(21, 22) and action.get("action") not in {"close", "hold"}:
             action["action"] = "close"
             action["reason"] += " | Pre-22:00 UK: prefer locking profit."
             action["force_close"] = True
             action["policy"] = "session_exit"
 
-        # Don't move SL off breakeven
+        # Don’t move SL off breakeven
         if pos and action.get("action") and "new_sl" in action and pos.open_price is not None and pos.sl is not None:
             tick_tol = infer_tick_tol(ind_main)
             if abs(pos.sl - pos.open_price) <= tick_tol:
                 action["new_sl"] = pos.sl
                 action["reason"] += " | SL at breakeven; not moving SL."
 
-        # Ensure rich fields exist
+        # Ensure rich fields exist (so the EA panel has everything)
         action.setdefault("missing_categories", [])
         action.setdefault("needed_to_enter", [])
         action.setdefault("disqualifiers", [])
@@ -478,6 +544,7 @@ Return JSON EXACTLY like:
         action.setdefault("model_self_audit", {"data_used": [], "data_ignored": [], "confidence_rationale": ""})
         action["recovery_mode"] = in_recovery
 
+        logging.info(f"📝 Decision: {json.dumps(action)[:1200]}")
         return JSONResponse(content=action)
 
     except Exception as e:
@@ -504,8 +571,9 @@ Return JSON EXACTLY like:
             "force_close": False
         })
 
+
 @app.get("/")
 async def root():
     return {
-        "message": "SmartGPT EA SCALPER — GPT-5, tf2/tf3, rich reasoning (evidence audit + counterfactuals), ATR-normalized EMA guard, 19:00 UK profit close, strict confluences, God-mode (soft), session guards, recovery mode."
+        "message": "SmartGPT EA SCALPER — GPT-5, regime+spread aware, tf2/tf3, evidence audit & counterfactuals, ATR-normalized EMA guard, 19:00 UK profit close, strict confluences, God-mode (soft), session guards, recovery mode."
     }
