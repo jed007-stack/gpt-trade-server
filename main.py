@@ -332,7 +332,7 @@ Indicators (1H): {ind_1h.dict()}
                 {"role": "system", "content": "You are an elite, disciplined, risk-aware SCALPER trade assistant. Reply ONLY in valid JSON. Fill all fields. For every buy or sell, always suggest new_sl and new_tp."},
                 {"role": "user", "content": prompt}
             ],
-            max_tokens=700,
+            max_completion_tokens=700
             temperature=0.13
         )
         decision = chat.choices[0].message.content.strip()
