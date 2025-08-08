@@ -82,14 +82,14 @@ class Timeframes(BaseModel):
 class TradeData(BaseModel):
     symbol: str
     timeframe: str
-    update_type: Optional[str] = None  # "ema_over_lwma", "session_check_19", etc.
+    update_type: Optional[str] = None
     cross_signal: Optional[str] = None
     cross_meaning: Optional[str] = None
-    indicators: Optional[Indicators] = None         # main TF
-    tf2_indicators: Optional[Indicators] = None     # tf2
-    tf3_indicators: Optional[Indicators] = None     # tf3
+    indicators: Optional[Indicators] = None
+    tf2_indicators: Optional[Indicators] = None
+    tf3_indicators: Optional[Indicators] = None
     timeframes: Optional[Timeframes] = None
-    tf_names: Optional[Dict[str, str]] = None       # e.g., {"main":"M5","tf2":"M15","tf3":"H1"}
+    tf_names: Optional[Dict[str, str]] = None
     position: Optional[Position] = None
     account: Optional[Account] = None
     news_override: Optional[bool] = False
@@ -191,7 +191,6 @@ def ema_confirms(ind: Indicators, action: str):
     return False
 
 def infer_tick_tol(ind: Indicators) -> float:
-    # Guess tolerance from price decimals or fallback
     price = None
     if ind and ind.price_array:
         for v in reversed(ind.price_array):
@@ -202,7 +201,7 @@ def infer_tick_tol(ind: Indicators) -> float:
         return 1e-4
     s = f"{price:.10f}".rstrip("0")
     decimals = len(s.split(".")[1]) if "." in s else 2
-    return 10 ** (-(decimals - 1))  # slightly looser than 1 tick
+    return 10 ** (-(decimals - 1))
 
 def atr_norm_slope(slope: float, ind: Indicators) -> float:
     atr = ind.atr if ind and ind.atr else None
@@ -224,20 +223,16 @@ async def gpt_manage(wrapper: TradeWrapper):
     cross_signal = trade.cross_signal or "none"
     cross_meaning = trade.cross_meaning or "none"
 
-    ema_period = ind_main.ema_period or 100  # dynamic EMA period from payload (EA)
+    ema_period = ind_main.ema_period or 100
     tf_label_main = (trade.tf_names or {}).get("main", "main")
     tf_label_tf2  = (trade.tf_names or {}).get("tf2",  "tf2")
     tf_label_tf3  = (trade.tf_names or {}).get("tf3",  "tf3")
 
-    # Slopes
     main_slope = ema_slope(ind_main); main_slope_txt = ema_slope_desc(main_slope)
     tf2_slope  = ema_slope(ind_tf2);  tf2_slope_txt  = ema_slope_desc(tf2_slope)
     tf3_slope  = ema_slope(ind_tf3);  tf3_slope_txt  = ema_slope_desc(tf3_slope)
 
-    # ATR-normalized slope to judge "strongly opposes"
     norm_main = atr_norm_slope(main_slope, ind_main)
-
-    # Recovery mode
     in_recovery_mode = bool(trade.last_trade_was_loss or (trade.unrecovered_loss or 0.0) > 0.0)
 
     logging.info(f"🔻 RAW PAYLOAD:\n{wrapper.json()}\n---")
@@ -256,7 +251,7 @@ async def gpt_manage(wrapper: TradeWrapper):
             "disqualifiers": ["News override"]
         })
 
-    # 7pm UK policy: if EA pings at 19:00 or it's 19:00+, close profitable positions (force_close)
+    # 7pm UK policy
     if trade.update_type == "session_check_19" or is_uk_at_or_after(19):
         if pos and (pos.pnl or 0.0) > 0.0:
             return JSONResponse(content={
@@ -273,43 +268,45 @@ async def gpt_manage(wrapper: TradeWrapper):
                 "disqualifiers": ["Session policy exit"]
             })
 
-    # Recovery note
+    # Recovery banner
     recovery_note = ""
     if in_recovery_mode:
         recovery_note = (
             "\n---\n"
-            "RECOVERY MODE: The last trade was a loss and has not been fully recovered. "
-            "Recommend a trade ONLY if at least 5/6 unique categories align and confidence ≥ 8. "
-            "List the exact categories used (Trend, Momentum, Volatility, Volume, Structure, ADX).\n---\n"
+            "RECOVERY MODE: Require ≥5/6 categories and confidence ≥8. "
+            "List the exact categories used.\n---\n"
         )
 
-    # Prompt — ask for rich, structured JSON (super-detailed)
+    # Prompt — maximize GPT-5’s “abilities” without chain-of-thought
     prompt = f"""{recovery_note}
-You are an elite, disciplined prop-firm trading assistant. Reply in STRICT JSON.
+You are an elite, disciplined prop-firm trading assistant. Reply in STRICT JSON only.
 
-OBJECTIVE:
-- Detail EXACTLY what you HAVE (by category), what is MISSING, and the MINIMAL things you would NEED to enter.
-- If HOLD: list disqualifiers and the missing items. If CLOSE: justify via categories or policy/session. If BUY/SELL: include numeric 'new_sl' & 'new_tp' and explain SL/TP logic.
+USE ALL CAPABILITIES:
+- Numeric precision: quote current indicator values you use (MACD numbers, RSI, MFI, ADX, BB %, ATR multiples, EMA slope values).
+- Evidence audit: explicitly list what data you used vs. ignored (with reasons).
+- Counterfactuals: list the minimal changes that would flip HOLD→ENTRY (e.g., "ADX>22 and price retest 100EMA as support").
+- Session awareness: apply 19:00–07:00 UK and Friday 17:00+ rules.
+- Risk engineering: state SL method (swing/ATR) and TP method (≥2R or SR/Fib), with numeric examples.
 
-CATEGORIES (MAX 1 per category):
+CATEGORIES (max 1 per category):
 1) TREND: EMA {ema_period} on MAIN TF ONLY (mandatory for entries)
 2) MOMENTUM: MACD OR RSI OR Stochastic
 3) VOLATILITY: Bollinger Bands OR ATR
 4) VOLUME: MFI OR volume spike
 5) STRUCTURE: S/R OR Fibonacci OR reversal candle
-6) ADX: ADX > 20 + direction
+6) ADX: ADX > 20 and direction
 
 HARD RULES:
 - Confluences line is mandatory: "Confluences: Trend (...), Momentum (...), Volatility (...), Volume (...), Structure (...), ADX (...)."
-- ABSOLUTE TREND: BUY only if EMA {ema_period} slopes up AND price>EMA; SELL only if EMA {ema_period} slopes down AND price<EMA.
-- GOD-MODE: Allowed only if EMA is NOT strongly against. If strongly opposite, HOLD. If used, set god_mode_used=true and explain why it’s acceptable.
+- ABSOLUTE TREND: BUY only if EMA {ema_period} slopes up AND price>EMA; SELL only if slopes down AND price<EMA.
+- GOD-MODE: Allowed only if EMA is NOT strongly against. If used, set god_mode_used=true and justify.
 - Entries need at least {(5 if in_recovery_mode else 4)} unique categories and confidence ≥ {(8 if in_recovery_mode else 6)}.
-- No new trades 19:00–07:00 UK and after 17:00 UK Friday (mark session_block=true and HOLD unless closing profits).
+- No new trades 19:00–07:00 UK and after 17:00 UK Friday (set session_block=true and HOLD unless closing profits).
 
 SL/TP:
 - SL beyond last swing or ≥1xATR (state which, with numbers).
-- TP ≥2xSL or at next S/R/Fib (state which, with numbers).
-- Always return numeric new_sl and new_tp for entries.
+- TP ≥2xSL or next S/R/Fib (state which, with numbers).
+- Always return numeric new_sl/new_tp for entries.
 
 SLOPES ({tf_label_main}/{tf_label_tf2}/{tf_label_tf3}):
 - {tf_label_main} EMA {ema_period}: {main_slope_txt}
@@ -335,8 +332,8 @@ Return JSON EXACTLY like:
   "new_tp": 0.0,
   "categories": ["trend","momentum","volatility","volume","structure","adx"],
 
-  "missing_categories": ["volume","structure"],            # what’s missing RIGHT NOW
-  "needed_to_enter": ["ADX>20","price above EMA"],         # minimal requirements you want
+  "missing_categories": ["volume","structure"],        # what’s missing RIGHT NOW
+  "needed_to_enter": ["ADX>20","price above EMA"],     # minimal changes to enter
   "disqualifiers": ["EMA {ema_period} flat","Session block"],
 
   "session_block": false,
@@ -353,7 +350,13 @@ Return JSON EXACTLY like:
   "volatility_context": {{"atr": 0.0, "bb_state": "squeeze|expansion|neutral"}},
   "volume_context": {{"mfi": 0.0, "state": "low|normal|high"}},
   "risk_notes": "1R=..., SL at swing low + ATR buffer...",
-  "policy": "none|session_exit|friday_exit|news_conflict"
+  "policy": "none|session_exit|friday_exit|news_conflict",
+
+  "model_self_audit": {{
+    "data_used": ["ema_array[-2:]", "price_array[-1]", "macd.main", "mfi", "adx"],
+    "data_ignored": ["ichimoku (out of scope for categories)"],
+    "confidence_rationale": "why confidence=X given the evidence"
+  }}
 }}
 """
 
@@ -361,10 +364,10 @@ Return JSON EXACTLY like:
         chat = openai_client.chat.completions.create(
             model="gpt-5",
             messages=[
-                {"role": "system", "content": "You are an elite, disciplined, risk-aware SCALPER assistant. Reply ONLY in strict JSON. Include 'new_sl' and 'new_tp' for buy/sell."},
+                {"role": "system", "content": "You are an elite, disciplined, risk-aware SCALPER assistant. Reply ONLY in strict JSON. Include 'new_sl' and 'new_tp' for buy/sell. Never include analysis outside the JSON fields requested."},
                 {"role": "user", "content": prompt}
             ],
-            temperature=0,
+            # no temperature (GPT-5 only supports default)
             max_completion_tokens=900,
             response_format={"type": "json_object"}
         )
@@ -398,7 +401,7 @@ Return JSON EXACTLY like:
                 action["action"] = "hold"
                 action["reason"] += f" | Confidence too low ({conf}<{min_conf})."
 
-        # Session guards (no new entries overnight / Friday late)
+        # Session guards
         if action.get("action") in {"buy", "sell"} and is_between_uk_time(19, 7):
             action["action"] = "hold"
             action["reason"] += " | No new trades between 19:00 and 07:00 UK."
@@ -418,7 +421,7 @@ Return JSON EXACTLY like:
         if action.get("action") in {"buy", "sell"}:
             main_trend = ema_trend(ind_main)
             norm = norm_main
-            strong_thresh = 0.02  # ATR-normalized threshold; tune per symbol if needed
+            strong_thresh = 0.02
             trend_block = False
             if not ema_confirms(ind_main, action["action"]):
                 if action["action"] == "buy" and (main_trend == -1 and norm < -strong_thresh):
@@ -430,32 +433,30 @@ Return JSON EXACTLY like:
                 action["reason"] += " | EMA trend strongly opposes (hard block)."
                 action["god_mode_used"] = False
             else:
-                # If not confirming but not strongly opposite -> allow God-mode
                 if not ema_confirms(ind_main, action["action"]):
                     action["god_mode_used"] = True
                     action["reason"] += " | God-mode: EMA not strongly against — confluence+confidence allow entry."
-                # Bonus if tf2 & tf3 align
                 agrees_tf2 = ema_trend(ind_tf2) == (1 if action["action"] == "buy" else -1)
                 agrees_tf3 = ema_trend(ind_tf3) == (1 if action["action"] == "buy" else -1)
                 if agrees_tf2 and agrees_tf3:
                     action["confidence"] = int(action.get("confidence", 0)) + 1
                     action["reason"] += " | EMA alignment across main/tf2/tf3. Confidence +1."
 
-        # Pre-22:00 UK: prefer locking profit on existing positions
+        # Pre-22:00 UK profit lock preference
         if pos and (pos.pnl or 0.0) > 0 and is_between_uk_time(21, 22) and action.get("action") not in {"close", "hold"}:
             action["action"] = "close"
             action["reason"] += " | Pre-22:00 UK: prefer locking profit."
             action["force_close"] = True
             action["policy"] = "session_exit"
 
-        # Prevent SL move when at breakeven
+        # Don't move SL off breakeven
         if pos and action.get("action") and "new_sl" in action and pos.open_price is not None and pos.sl is not None:
             tick_tol = infer_tick_tol(ind_main)
             if abs(pos.sl - pos.open_price) <= tick_tol:
                 action["new_sl"] = pos.sl
                 action["reason"] += " | SL at breakeven; not moving SL."
 
-        # Ensure rich fields exist even if model skipped them
+        # Ensure rich fields exist
         action.setdefault("missing_categories", [])
         action.setdefault("needed_to_enter", [])
         action.setdefault("disqualifiers", [])
@@ -474,6 +475,7 @@ Return JSON EXACTLY like:
         action.setdefault("risk_notes", "")
         action.setdefault("policy", "none")
         action.setdefault("force_close", False)
+        action.setdefault("model_self_audit", {"data_used": [], "data_ignored": [], "confidence_rationale": ""})
         action["recovery_mode"] = in_recovery
 
         return JSONResponse(content=action)
@@ -497,6 +499,7 @@ Return JSON EXACTLY like:
             "volume_context": {},
             "risk_notes": "",
             "policy": "none",
+            "model_self_audit": {"data_used": [], "data_ignored": [], "confidence_rationale": ""},
             "recovery_mode": in_recovery_mode,
             "force_close": False
         })
@@ -504,5 +507,5 @@ Return JSON EXACTLY like:
 @app.get("/")
 async def root():
     return {
-        "message": "SmartGPT EA SCALPER — GPT-5, tf2/tf3, rich reasoning (what’s missing/needed), ATR-normalized EMA guard, 19:00 UK profit close, strict confluences, God-mode (soft), session guards, recovery mode."
+        "message": "SmartGPT EA SCALPER — GPT-5, tf2/tf3, rich reasoning (evidence audit + counterfactuals), ATR-normalized EMA guard, 19:00 UK profit close, strict confluences, God-mode (soft), session guards, recovery mode."
     }
