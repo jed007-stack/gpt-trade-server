@@ -327,7 +327,7 @@ Indicators (1H): {ind_1h.dict()}
 
     try:
         chat = openai_client.chat.completions.create(
-            model="gpt-5",  # <-- Upgrade here to GPT-5!
+            model="gpt-5",  # <-- FORCED GPT-5 ONLY!
             messages=[
                 {"role": "system", "content": "You are an elite, disciplined, risk-aware SCALPER trade assistant. Reply ONLY in valid JSON. Fill all fields. For every buy or sell, always suggest new_sl and new_tp."},
                 {"role": "user", "content": prompt}
@@ -344,8 +344,6 @@ Indicators (1H): {ind_1h.dict()}
         claimed = extract_categories(action.get("reason", ""))
         cat_count = len(claimed)
         conf = action.get("confidence", 0)
-
-        # ... rest of your enforcement code is unchanged
 
         min_cats = 5 if in_recovery_mode else 4
         min_conf = 8 if in_recovery_mode else 6
@@ -369,7 +367,7 @@ Indicators (1H): {ind_1h.dict()}
         if "reason" not in action or not action["reason"]:
             action["reason"] = "No reasoning returned by GPT."
 
-        if pos and action.get("action") == "close" and action.get("confidence", 0) >=9 :
+        if pos and action.get("action") == "close" and action.get("confidence", 0) >= 9:
             reason = action.get("reason", "")
             flipped_cats = extract_categories(reason)
             if len(flipped_cats) < 4:
@@ -447,5 +445,5 @@ Indicators (1H): {ind_1h.dict()}
 @app.get("/")
 async def root():
     return {
-        "message": "SmartGPT EA SCALPER (GPT-5, EMA 100 slope reporting and enforcement, bonus for H1/H4 alignment, strict confluence, SL/TP enforcement, prop/session/overnight safety, recovery mode, anti-lazy JSON/logic enforcement)."
+        "message": "SmartGPT EA SCALPER (GPT-5 ONLY, EMA 100 slope reporting and enforcement, bonus for H1/H4 alignment, strict confluence, SL/TP enforcement, prop/session/overnight safety, recovery mode, anti-lazy JSON/logic enforcement)."
     }
