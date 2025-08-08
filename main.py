@@ -125,7 +125,6 @@ def uk_time_now():
 
 def is_between_uk_time(start_h, end_h):
     now = uk_time_now().time()
-    # Handles overnight windows like 19–7
     if start_h < end_h:
         return time(start_h, 0) <= now < time(end_h, 0)
     else:
@@ -163,6 +162,14 @@ def ema100_slope(ind):
         return 0
     return ind.ema_array[-1] - ind.ema_array[-2]
 
+def ema100_slope_desc(slope, threshold=0.0001):
+    if slope > threshold:
+        return f"sloping up ({slope:.5f})"
+    elif slope < -threshold:
+        return f"sloping down ({slope:.5f})"
+    else:
+        return f"flat ({slope:.5f})"
+
 def ema100_confirms(ind, action):
     trend = ema100_trend(ind)
     price = ind.price_array[-1] if ind and ind.price_array else None
@@ -185,6 +192,14 @@ async def gpt_manage(wrapper: TradeWrapper):
     candles_1h = (trade.candles3 or [])[-5:]
     cross_signal = trade.cross_signal or "none"
     cross_meaning = trade.cross_meaning or "none"
+
+    # --------- Calculate slopes for main, H1, H4 EMA 100 ---------
+    main_ema_slope = ema100_slope(ind_5m)
+    main_ema_slope_txt = ema100_slope_desc(main_ema_slope)
+    h1_ema_slope = ema100_slope(ind_15m)
+    h1_ema_slope_txt = ema100_slope_desc(h1_ema_slope)
+    h4_ema_slope = ema100_slope(ind_1h)
+    h4_ema_slope_txt = ema100_slope_desc(h4_ema_slope)
 
     # -------- Recovery Mode Logic --------
     in_recovery_mode = False
@@ -220,7 +235,7 @@ async def gpt_manage(wrapper: TradeWrapper):
             "\n---\n"
         )
 
-    # === STRICT PROMPT, EMA 100 ONLY ===
+    # === STRICT PROMPT, EMA 100 ONLY, SLOPE SHOWN ===
     prompt = f"""{recovery_note}
 You are a decisive, disciplined prop firm trading assistant. DO NOT be lazy or generic; always justify every action using live indicator values and current price context. NEVER reuse generic logic.
 If you do not explicitly list at least {(5 if in_recovery_mode else 4)} unique categories (Trend, Momentum, Volatility, Volume, Structure, ADX) in your reason as in the example, your action will be set to 'hold' and the trade will not be taken.
@@ -245,6 +260,7 @@ ABSOLUTE TREND RULE:
 - You are FORBIDDEN from recommending a buy unless the EMA 100 on the main timeframe is sloping up and price is above EMA 100.
 - You are FORBIDDEN from recommending a sell unless the EMA 100 on the main timeframe is sloping down and price is below EMA 100.
 - If EMA 100 on the main timeframe does NOT confirm the direction, your action must be "hold" and you must state this in your reason.
+- **ALWAYS show the slope value and say if it is 'sloping up', 'sloping down', or 'flat' for main, H1, and H4 EMA 100.**
 - If EMA 100 on the main, H1, and H4 timeframes ALL align with your direction (all sloping up for buy, or all down for sell), ADD +1 bonus to your confidence score and clearly state this in your reason.
 - Only EMA 100 is used for trend on any timeframe. Do not use SMMA or any other MA for trend filtering.
 
@@ -271,10 +287,15 @@ For EVERY response, including "hold" and "close", you must ALWAYS include a full
 - After the confluences line, clearly explain why action is "hold" (e.g. "Not enough categories align.")  
 - **Never skip the confluences line, even for "hold" or session filter.**
 
+**SLOPE VALUES:**  
+- Main EMA 100: {main_ema_slope_txt}  
+- H1 EMA 100: {h1_ema_slope_txt}  
+- H4 EMA 100: {h4_ema_slope_txt}  
+
 EXAMPLES (JSON only, strictly follow this style):
 {{
   "action": "buy",
-  "reason": "Confluences: Trend (EMA 100 up), Momentum (MACD positive), Volatility (BB squeeze breakout), Volume (MFI strong), Structure (Fibonacci support), ADX (trend > 20). EMA 100 on all timeframes confirms trend. Confidence +1.",
+  "reason": "Confluences: Trend (EMA 100 up, sloping up +0.00022), Momentum (MACD positive), Volatility (BB squeeze breakout), Volume (MFI strong), Structure (Fibonacci support), ADX (trend > 20). EMA 100 on all timeframes is sloping up. Confidence +1.",
   "confidence": 9,
   "lot": 2,
   "new_sl": 2290,
@@ -282,12 +303,12 @@ EXAMPLES (JSON only, strictly follow this style):
 }}
 {{
   "action": "hold",
-  "reason": "Confluences: Trend (EMA 100 flat), Momentum (MACD positive), Volatility (neutral), Volume (low), Structure (neutral), ADX (weak). Not enough categories align.",
+  "reason": "Confluences: Trend (EMA 100 flat, slope +0.00002), Momentum (MACD positive), Volatility (neutral), Volume (low), Structure (neutral), ADX (weak). Not enough categories align.",
   "confidence": 2
 }}
 {{
   "action": "close",
-  "reason": "Confluences: Trend (EMA 100 turning down), Momentum (MACD), Structure (support break), Volatility (BB expansion), Volume (neutral), ADX (strong). Trend reversal: EMA 100 has turned down and price crossed below. 15m MACD down, price broke below Ichimoku cloud, major SR break.",
+  "reason": "Confluences: Trend (EMA 100 turning down, slope -0.00045), Momentum (MACD), Structure (support break), Volatility (BB expansion), Volume (neutral), ADX (strong). Trend reversal: EMA 100 has turned down and price crossed below. 15m MACD down, price broke below Ichimoku cloud, major SR break.",
   "confidence": 9
 }}
 
@@ -306,7 +327,7 @@ Indicators (1H): {ind_1h.dict()}
 
     try:
         chat = openai_client.chat.completions.create(
-            model="gpt-4o",
+            model="gpt-5",  # <-- Upgrade here to GPT-5!
             messages=[
                 {"role": "system", "content": "You are an elite, disciplined, risk-aware SCALPER trade assistant. Reply ONLY in valid JSON. Fill all fields. For every buy or sell, always suggest new_sl and new_tp."},
                 {"role": "user", "content": prompt}
@@ -324,7 +345,8 @@ Indicators (1H): {ind_1h.dict()}
         cat_count = len(claimed)
         conf = action.get("confidence", 0)
 
-        # Confluence and confidence enforcement
+        # ... rest of your enforcement code is unchanged
+
         min_cats = 5 if in_recovery_mode else 4
         min_conf = 8 if in_recovery_mode else 6
 
@@ -332,13 +354,11 @@ Indicators (1H): {ind_1h.dict()}
             action["action"] = "hold"
             action["reason"] += f" | GPT did not properly explain confluences or unique categories ({cat_count} found)."
 
-        # ENFORCE SL/TP suggestions on all entries
         if action.get("action") in {"buy", "sell"}:
             if "new_sl" not in action or "new_tp" not in action:
                 action["action"] = "hold"
                 action["reason"] += " | GPT did not return both new_sl and new_tp for this trade."
 
-        # ENFORCE confidence threshold
         if action.get("action") in {"buy", "sell"} and conf < min_conf:
             action["action"] = "hold"
             action["reason"] += f" (confidence too low for entry, {conf})"
@@ -349,7 +369,6 @@ Indicators (1H): {ind_1h.dict()}
         if "reason" not in action or not action["reason"]:
             action["reason"] = "No reasoning returned by GPT."
 
-        # Prevent "close" at high confidence unless enough categories signal a real reversal
         if pos and action.get("action") == "close" and action.get("confidence", 0) >=9 :
             reason = action.get("reason", "")
             flipped_cats = extract_categories(reason)
@@ -357,21 +376,17 @@ Indicators (1H): {ind_1h.dict()}
                 action["action"] = "hold"
                 action["reason"] += " | Close not allowed at high confidence unless 4+ categories signal reversal."
         
-        # SL Breakeven Guard
         if pos and pos.open_price and pos.sl is not None:
             if abs(pos.sl - pos.open_price) < 1e-5:
                 if "new_sl" in action and action["new_sl"] != pos.sl:
                     action["reason"] += " | SL at breakeven, not allowed to move."
                     action["new_sl"] = pos.sl
 
-        # === EMA 100 Main Trend Enforcement & Flexible God Mode Override ===
         if action.get("action") in {"buy", "sell"}:
             main_ema_trend = ema100_trend(ind_5m)
             main_ema_slope = ema100_slope(ind_5m)
             min_cats = 5 if in_recovery_mode else 4
-            # Normal EMA100 filter
             if not ema100_confirms(ind_5m, action["action"]):
-                # Allow if not strongly against: "strong" = slope < -0.2 (for buys) or > +0.2 (for sells)
                 trend_block = False
                 if action["action"] == "buy" and main_ema_trend == -1 and main_ema_slope < -0.2:
                     trend_block = True
@@ -389,13 +404,11 @@ Indicators (1H): {ind_1h.dict()}
                     action["confidence"] = int(action.get("confidence", 0)) + 1
                     action["reason"] += " | EMA 100 on all timeframes confirms trend. Confidence +1."
 
-        # Block new trades between 19:00 and 07:00 UK time (overnight)
         if action.get("action") in {"buy", "sell"}:
             if is_between_uk_time(19, 7):
                 action["action"] = "hold"
                 action["reason"] += " | No new trades between 19:00 and 07:00 UK time."
 
-        # Friday/weekend/session guards
         if is_friday_5pm_or_later():
             if pos and pos.pnl and pos.pnl > 0 and action.get("action") not in {"close", "hold"}:
                 action["action"] = "close"
@@ -434,5 +447,5 @@ Indicators (1H): {ind_1h.dict()}
 @app.get("/")
 async def root():
     return {
-        "message": "SmartGPT EA SCALPER (GPT-4o, EMA 100 main TF trend enforcement w/ flexible override, bonus for H1/H4 alignment, strict confluence, SL/TP enforcement, prop/session/overnight safety, recovery mode, anti-lazy JSON/logic enforcement)."
+        "message": "SmartGPT EA SCALPER (GPT-5, EMA 100 slope reporting and enforcement, bonus for H1/H4 alignment, strict confluence, SL/TP enforcement, prop/session/overnight safety, recovery mode, anti-lazy JSON/logic enforcement)."
     }
