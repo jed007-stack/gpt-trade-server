@@ -1,6 +1,6 @@
 from fastapi import FastAPI
-from pydantic import BaseModel
-from typing import List, Optional, Dict, Any
+from pydantic import BaseModel, Field, ValidationError, conint, confloat
+from typing import List, Optional, Dict, Any, Literal
 from fastapi.responses import JSONResponse
 import openai
 import os
@@ -21,7 +21,7 @@ app = FastAPI()
 logging.basicConfig(level=logging.INFO)
 
 
-# === Data Models ===
+# === Data Models (incoming) ===
 class MACD(BaseModel):
     main: Optional[float] = None
     signal: Optional[float] = None
@@ -121,8 +121,69 @@ class TradeWrapper(BaseModel):
     data: TradeData
 
 
+# === Model for outgoing decision (strict) ===
+AllowedAction = Literal["buy", "sell", "hold", "close"]
+
+class EMAContext(BaseModel):
+    period: Optional[int] = None
+    price_vs_ema: Optional[Literal["above","below","near","unknown"]] = "unknown"
+    aligns_all_tfs: Optional[bool] = False
+    slopes: Optional[Dict[str, str]] = None
+
+class StructureSummary(BaseModel):
+    sr_levels: List[float] = []
+    last_reversal: Optional[str] = "none"
+
+class FibSummary(BaseModel):
+    high: float = 0.0
+    low: float = 0.0
+    active_levels: List[str] = []
+
+class VolatilityContext(BaseModel):
+    atr: float = 0.0
+    bb_state: Optional[Literal["squeeze","expansion","neutral"]] = "neutral"
+
+class VolumeContext(BaseModel):
+    mfi: float = 0.0
+    state: Optional[Literal["low","normal","high","unknown"]] = "unknown"
+
+class ModelSelfAudit(BaseModel):
+    data_used: List[str] = []
+    data_ignored: List[str] = []
+    confidence_rationale: str = ""
+
+class DecisionOut(BaseModel):
+    action: AllowedAction
+    reason: str
+    confidence: conint(ge=0, le=10) = 0
+    lot: Optional[confloat(ge=0)] = None
+    new_sl: Optional[float] = None
+    new_tp: Optional[float] = None
+    categories: List[str] = []
+
+    missing_categories: List[str] = []
+    needed_to_enter: List[str] = []
+    disqualifiers: List[str] = []
+
+    session_block: bool = False
+    god_mode_used: bool = False
+    force_close: bool = False
+
+    ema_context: EMAContext = EMAContext()
+    structure_summary: StructureSummary = StructureSummary()
+    fib_summary: FibSummary = FibSummary()
+    volatility_context: VolatilityContext = VolatilityContext()
+    volume_context: VolumeContext = VolumeContext()
+
+    risk_notes: str = ""
+    policy: Optional[Literal["none","session_exit","friday_exit","news_conflict"]] = "none"
+    recovery_mode: bool = False
+
+    model_self_audit: ModelSelfAudit = ModelSelfAudit()
+
+
 # === Helpers ===
-def flatten_action(decision):
+def flatten_action(decision: Any) -> Dict[str, Any]:
     """Accept dict OR string JSON; return a dict with at least action/reason/confidence."""
     if isinstance(decision, dict) and "action" in decision:
         return decision
@@ -183,7 +244,7 @@ def is_uk_at_or_after(hour_24):
     return uk_time_now().time() >= time(hour_24, 0)
 
 def extract_categories(reason):
-    m = re.search(r"Confluences?:\s*([^.]+)", reason, re.IGNORECASE)
+    m = re.search(r"Confluences?:\s*([^.]+)", reason or "", re.IGNORECASE)
     if not m:
         return set()
     cats = m.group(1)
@@ -249,6 +310,77 @@ def atr_norm_slope(slope: float, ind: Indicators) -> float:
     return slope / ref
 
 
+# === Chat call + repair ===
+ALLOWED_ACTIONS = {"buy", "sell", "hold", "close"}
+
+def sanitize_and_validate(out_dict: Dict[str, Any], fallback_reason: str, in_recovery_mode: bool) -> DecisionOut:
+    # Normalize action
+    action = str(out_dict.get("action", "hold")).strip().lower()
+    if action not in ALLOWED_ACTIONS:
+        action = "hold"
+        out_dict["reason"] = (out_dict.get("reason") or "") + " | Action invalid; coerced to HOLD."
+    out_dict["action"] = action
+
+    # Ensure fields exist
+    out_dict.setdefault("reason", fallback_reason)
+    out_dict.setdefault("confidence", 0)
+    out_dict.setdefault("categories", [])
+    out_dict.setdefault("missing_categories", [])
+    out_dict.setdefault("needed_to_enter", [])
+    out_dict.setdefault("disqualifiers", [])
+    out_dict.setdefault("session_block", False)
+    out_dict.setdefault("god_mode_used", False)
+    out_dict.setdefault("force_close", False)
+    out_dict.setdefault("ema_context", {})
+    out_dict.setdefault("structure_summary", {})
+    out_dict.setdefault("fib_summary", {})
+    out_dict.setdefault("volatility_context", {})
+    out_dict.setdefault("volume_context", {})
+    out_dict.setdefault("risk_notes", "")
+    out_dict.setdefault("policy", "none")
+    out_dict.setdefault("model_self_audit", {})
+    out_dict["recovery_mode"] = in_recovery_mode
+
+    # Clamp confidence
+    try:
+        conf = int(out_dict.get("confidence", 0) or 0)
+        if conf < 0: conf = 0
+        if conf > 10: conf = 10
+        out_dict["confidence"] = conf
+    except Exception:
+        out_dict["confidence"] = 0
+
+    # Validate via Pydantic (will raise if off-spec)
+    return DecisionOut(**out_dict)
+
+def call_gpt_messages(prompt: str):
+    chat = openai_client.chat.completions.create(
+        model="gpt-5",
+        messages=[
+            {"role": "system", "content": "You are an elite, disciplined, risk-aware SCALPER assistant. Reply ONLY in strict JSON. Include 'new_sl' and 'new_tp' for buy/sell. Never include analysis outside the JSON fields requested."},
+            {"role": "user", "content": prompt}
+        ],
+        max_completion_tokens=900,
+        temperature=0,
+        response_format={"type": "json_object"}
+    )
+    return chat.choices[0].message.content or ""
+
+def repair_once(raw_content: str) -> Optional[Dict[str, Any]]:
+    """One minimal repair attempt, still JSON-only."""
+    repair_prompt = (
+        "Repair the following content into EXACTLY one valid JSON object with keys: "
+        "action, reason, confidence, lot, new_sl, new_tp, categories, missing_categories, "
+        "needed_to_enter, disqualifiers, session_block, god_mode_used, force_close, "
+        "ema_context, structure_summary, fib_summary, volatility_context, volume_context, "
+        "risk_notes, policy, recovery_mode, model_self_audit. "
+        "Values may be empty/null but the object MUST be valid JSON. "
+        "Allowed actions: buy, sell, hold, close. Return ONLY the JSON.\n\n"
+        f"<raw>{raw_content}</raw>"
+    )
+    fixed = call_gpt_messages(repair_prompt)
+    return extract_json_object(fixed)
+
 # === Core endpoint ===
 @app.post("/gpt/manage")
 async def gpt_manage(wrapper: TradeWrapper):
@@ -291,17 +423,24 @@ async def gpt_manage(wrapper: TradeWrapper):
             "reason": "News conflict — override active",
             "confidence": 0,
             "categories": [],
-            "recovery_mode": in_recovery_mode,
-            "force_close": False,
-            "session_block": False,
-            "god_mode_used": False,
             "missing_categories": ["trend","momentum","volatility","volume","structure","adx"],
             "needed_to_enter": ["Wait for news window to end."],
             "disqualifiers": ["News override"],
-            "policy": "news_conflict"
+            "session_block": False,
+            "god_mode_used": False,
+            "ema_context": {},
+            "structure_summary": {},
+            "fib_summary": {},
+            "volatility_context": {},
+            "volume_context": {},
+            "risk_notes": "",
+            "policy": "news_conflict",
+            "model_self_audit": {"data_used": [], "data_ignored": [], "confidence_rationale": ""},
+            "recovery_mode": in_recovery_mode,
+            "force_close": False
         })
 
-    # 19:00 UK policy (EA can ping us; we also self-guard if called later)
+    # 19:00 UK policy
     if trade.update_type == "session_check_19" or is_uk_at_or_after(19):
         if pos and (pos.pnl or 0.0) > 0.0:
             return JSONResponse(content={
@@ -316,7 +455,14 @@ async def gpt_manage(wrapper: TradeWrapper):
                 "missing_categories": [],
                 "needed_to_enter": [],
                 "disqualifiers": ["Session policy exit"],
-                "policy": "session_exit"
+                "policy": "session_exit",
+                "ema_context": {},
+                "structure_summary": {},
+                "fib_summary": {},
+                "volatility_context": {},
+                "volume_context": {},
+                "risk_notes": "",
+                "model_self_audit": {"data_used": [], "data_ignored": [], "confidence_rationale": ""}
             })
 
     # Recovery banner
@@ -328,7 +474,7 @@ async def gpt_manage(wrapper: TradeWrapper):
             "List the exact categories used.\n---\n"
         )
 
-    # === Prompt (rich; no chain-of-thought leakage; push model to be explicit) ===
+    # === Prompt ===
     prompt = f"""{recovery_note}
 You are a disciplined prop-firm scalping assistant. Reply in STRICT JSON only.
 
@@ -388,8 +534,8 @@ Return JSON EXACTLY like:
   "new_tp": 0.0,
   "categories": ["trend","momentum","volatility","volume","structure","adx"],
 
-  "missing_categories": ["volume","structure"],        # what’s missing RIGHT NOW
-  "needed_to_enter": ["ADX>20","price above EMA"],     # minimal changes to enter
+  "missing_categories": ["volume","structure"],
+  "needed_to_enter": ["ADX>20","price above EMA"],
   "disqualifiers": ["EMA {ema_period} flat","Session block"],
 
   "session_block": false,
@@ -418,21 +564,16 @@ Return JSON EXACTLY like:
 """
 
     try:
-        # gpt-5: do NOT set temperature; use max_completion_tokens (not max_tokens)
-        chat = openai_client.chat.completions.create(
-            model="gpt-5",
-            messages=[
-                {"role": "system", "content": "You are an elite, disciplined, risk-aware SCALPER assistant. Reply ONLY in strict JSON. Include 'new_sl' and 'new_tp' for buy/sell. Never include analysis outside the JSON fields requested."},
-                {"role": "user", "content": prompt}
-            ],
-            max_completion_tokens=900,
-            response_format={"type": "json_object"}
-        )
-
-        # Primary path: JSON content (since response_format=json_object)
-        raw = chat.choices[0].message.content or ""
+        raw = call_gpt_messages(prompt)
+        logging.info(f"📩 GPT raw (truncated): {raw[:800]}")
         decision = extract_json_object(raw) or {"raw": raw}
         action = flatten_action(decision)
+
+        # If still missing action, attempt one repair
+        if action.get("action") is None or action.get("action") == "hold" and "Could not decode" in (action.get("reason") or ""):
+            repaired = repair_once(raw)
+            if repaired:
+                action = repaired
 
         # Merge categories from explicit list + from the Confluences line
         claimed = set()
@@ -446,7 +587,7 @@ Return JSON EXACTLY like:
         min_cats = 5 if in_recovery else 4
         min_conf = 8 if in_recovery else 6
 
-        # Confluence line enforcement for entries
+        # Confluence line & thresholds for entries
         if action.get("action") in {"buy", "sell"}:
             if "confluences:" not in (action.get("reason", "").lower()):
                 action["action"] = "hold"
@@ -463,12 +604,11 @@ Return JSON EXACTLY like:
             if conf < min_conf:
                 action["action"] = "hold"
                 action["reason"] += f" | Confidence too low ({conf}<{min_conf})."
-            # If EA flagged require_sr_tp (big spread vs SL), insist TP rationale is SR/Fib
             if require_sr_tp and "structure" not in claimed:
                 action["action"] = "hold"
                 action["reason"] += " | High spread/SL: TP must be SR/Fib-based (Structure)."
 
-        # Session guards (no new entries overnight / late Friday)
+        # Session guards
         if action.get("action") in {"buy", "sell"} and is_between_uk_time(19, 7):
             action["action"] = "hold"
             action["reason"] += " | No new trades between 19:00 and 07:00 UK."
@@ -487,7 +627,7 @@ Return JSON EXACTLY like:
         # God-mode vs EMA rule (ATR-normalized)
         if action.get("action") in {"buy", "sell"}:
             main_trend = ema_trend(ind_main)
-            strong_thresh = 0.02  # tunable; ATR-normalized slope threshold for "strongly against"
+            strong_thresh = 0.02  # ATR-normalized slope threshold for "strongly against"
             trend_block = False
             if not ema_confirms(ind_main, action["action"]):
                 if action["action"] == "buy" and (main_trend == -1 and norm_main < -strong_thresh):
@@ -522,12 +662,7 @@ Return JSON EXACTLY like:
                 action["new_sl"] = pos.sl
                 action["reason"] += " | SL at breakeven; not moving SL."
 
-        # Ensure rich fields exist (so the EA panel has everything)
-        action.setdefault("missing_categories", [])
-        action.setdefault("needed_to_enter", [])
-        action.setdefault("disqualifiers", [])
-        action.setdefault("session_block", False)
-        action.setdefault("god_mode_used", False)
+        # Ensure rich fields exist for panel
         action.setdefault("ema_context", {
             "period": ema_period,
             "price_vs_ema": "unknown",
@@ -542,10 +677,25 @@ Return JSON EXACTLY like:
         action.setdefault("policy", "none")
         action.setdefault("force_close", False)
         action.setdefault("model_self_audit", {"data_used": [], "data_ignored": [], "confidence_rationale": ""})
-        action["recovery_mode"] = in_recovery
+        action["recovery_mode"] = in_recovery_mode
 
-        logging.info(f"📝 Decision: {json.dumps(action)[:1200]}")
-        return JSONResponse(content=action)
+        # Final validation & clamp
+        try:
+            validated = sanitize_and_validate(action, "Validated output", in_recovery_mode)
+        except ValidationError as ve:
+            logging.warning(f"ValidationError -> attempting repair once. {ve}")
+            repaired = repair_once(json.dumps(action))
+            if repaired is None:
+                # Hard fallback
+                validated = DecisionOut(
+                    action="hold", reason="Validation failed and repair unavailable.",
+                    confidence=0, categories=[], recovery_mode=in_recovery_mode
+                )
+            else:
+                validated = sanitize_and_validate(repaired, "Post-repair", in_recovery_mode)
+
+        logging.info(f"📝 Decision: {validated.model_dump_json()[:1200]}")
+        return JSONResponse(content=json.loads(validated.model_dump_json()))
 
     except Exception as e:
         logging.error(f"❌ GPT Error: {str(e)}")
@@ -575,5 +725,5 @@ Return JSON EXACTLY like:
 @app.get("/")
 async def root():
     return {
-        "message": "SmartGPT EA SCALPER — GPT-5, regime+spread aware, tf2/tf3, evidence audit & counterfactuals, ATR-normalized EMA guard, 19:00 UK profit close, strict confluences, God-mode (soft), session guards, recovery mode."
+        "message": "SmartGPT EA SCALPER — GPT-5, regime+spread aware, tf2/tf3, evidence audit & counterfactuals, ATR-normalized EMA guard, 19:00 UK profit close, strict confluences, God-mode (soft), session guards, recovery mode, JSON hard-validate+repair."
     }
