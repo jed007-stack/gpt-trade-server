@@ -361,7 +361,7 @@ def call_gpt_messages(prompt: str):
             {"role": "user", "content": prompt}
         ],
         max_completion_tokens=900,
-        temperature=0,
+        
         response_format={"type": "json_object"}
     )
     return chat.choices[0].message.content or ""
