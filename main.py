@@ -1,6 +1,6 @@
-# main.py — SmartGPT EA Server (full w/ fixes)
+# main.py — SmartGPT EA Server (hardened)
 from fastapi import FastAPI
-from pydantic import BaseModel, Field, ValidationError, conint, confloat
+from pydantic import BaseModel, ValidationError, conint, confloat
 from typing import List, Optional, Dict, Any, Literal
 from fastapi.responses import JSONResponse
 import os
@@ -216,6 +216,34 @@ def _coerce_policy(p):
         p = "none"
     return p if p in ALLOWED_POLICIES else "none"
 
+# NEW: robust coercers to stop Pydantic crashes
+
+def _as_bool(x):
+    if isinstance(x, bool):
+        return x
+    if isinstance(x, (int, float)):
+        return x != 0
+    if isinstance(x, str):
+        return x.strip().lower() in {"1","true","t","yes","y"}
+    return False
+
+
+def _as_str(x):
+    if x is None:
+        return ""
+    return x if isinstance(x, str) else json.dumps(x, ensure_ascii=False)
+
+
+def _as_list_str(x):
+    if x is None:
+        return []
+    if isinstance(x, list):
+        return [str(i) for i in x]
+    if isinstance(x, str):
+        return [x]
+    return [str(x)]
+
+
 def flatten_action(decision: Any) -> Dict[str, Any]:
     if isinstance(decision, dict) and "action" in decision:
         return decision
@@ -237,6 +265,7 @@ def flatten_action(decision: Any) -> Dict[str, Any]:
             pass
     return {"action": "hold", "reason": "Could not decode action.", "confidence": 0}
 
+
 def extract_json_object(s: str):
     if not isinstance(s, str):
         return None
@@ -255,10 +284,12 @@ def extract_json_object(s: str):
         except Exception:
             return None
 
+
 def uk_time_now():
     utc_now = datetime.utcnow()
     london = pytz.timezone('Europe/London')
     return utc_now.replace(tzinfo=pytz.utc).astimezone(london)
+
 
 def is_between_uk_time(start_h, end_h):
     now = uk_time_now().time()
@@ -267,12 +298,15 @@ def is_between_uk_time(start_h, end_h):
     else:
         return now >= time(start_h, 0) or now < time(end_h, 0)
 
+
 def is_friday_5pm_or_later():
     now = uk_time_now()
     return now.weekday() == 4 and now.time() >= time(17, 0)
 
+
 def is_uk_at_or_after(hour_24):
     return uk_time_now().time() >= time(hour_24, 0)
+
 
 def extract_categories(reason):
     m = re.search(r"Confluences?:\s*([^.]+)", reason or "", re.IGNORECASE)
@@ -286,6 +320,7 @@ def extract_categories(reason):
     return found
 
 # === EMA helpers ===
+
 def ema_trend(ind: Indicators):
     if not ind or not ind.ema_array or len(ind.ema_array) < 2:
         return 0
@@ -297,10 +332,12 @@ def ema_trend(ind: Indicators):
         return -1
     return 0
 
+
 def ema_slope(ind: Indicators):
     if not ind or not ind.ema_array or len(ind.ema_array) < 2:
         return 0.0
     return (ind.ema_array[-1] or 0.0) - (ind.ema_array[-2] or 0.0)
+
 
 def ema_slope_desc(slope, threshold=1e-6):
     if slope > threshold:
@@ -309,6 +346,7 @@ def ema_slope_desc(slope, threshold=1e-6):
         return f"sloping down ({slope:.6f})"
     else:
         return f"flat ({slope:.6f})"
+
 
 def ema_confirms(ind: Indicators, action: str):
     if not ind or not ind.ema_array or not ind.price_array:
@@ -320,6 +358,7 @@ def ema_confirms(ind: Indicators, action: str):
     if action == "sell":
         return (ema_last is not None and price is not None and price < ema_last and ema_trend(ind) == -1)
     return False
+
 
 def infer_tick_tol(ind: Indicators) -> float:
     price = None
@@ -334,6 +373,7 @@ def infer_tick_tol(ind: Indicators) -> float:
     decimals = len(s.split(".")[1]) if "." in s else 2
     return 10 ** (-(decimals - 1))
 
+
 def atr_norm_slope(slope: float, ind: Indicators) -> float:
     atr = ind.atr if ind and ind.atr else None
     ref = atr if (atr and atr > 0) else (ind.price_array[-1] if ind and ind.price_array else 1.0)
@@ -342,6 +382,7 @@ def atr_norm_slope(slope: float, ind: Indicators) -> float:
 
 
 # === Chat call + repair (GPT-5 primary, GPT-5-mini fallback) ===
+
 def _gpt_once(prompt: str, model_id: str) -> str:
     chat = openai_client.chat.completions.create(
         model=model_id,
@@ -355,6 +396,7 @@ def _gpt_once(prompt: str, model_id: str) -> str:
     )
     return chat.choices[0].message.content or ""
 
+
 def call_gpt_messages(prompt: str):
     try:
         return _gpt_once(prompt, MODEL_ID)
@@ -364,6 +406,7 @@ def call_gpt_messages(prompt: str):
             logging.warning(f"Primary model '{MODEL_ID}' unavailable; trying fallback '{FALLBACK_MODEL}'")
             return _gpt_once(prompt, FALLBACK_MODEL)
         raise
+
 
 def repair_once(raw_content: str) -> Optional[Dict[str, Any]]:
     repair_prompt = (
@@ -379,7 +422,8 @@ def repair_once(raw_content: str) -> Optional[Dict[str, Any]]:
     fixed = call_gpt_messages(repair_prompt)
     return extract_json_object(fixed)
 
-ALLOWED_ACTIONS = {"buy", "sell", "hold", "close"}
+
+# === Coercion + Validation ===
 
 def sanitize_and_validate(out_dict: Dict[str, Any], fallback_reason: str, in_recovery_mode: bool) -> DecisionOut:
     # Action clamp
@@ -409,16 +453,23 @@ def sanitize_and_validate(out_dict: Dict[str, Any], fallback_reason: str, in_rec
     out_dict.setdefault("model_self_audit", {})
     out_dict["recovery_mode"] = in_recovery_mode
 
-    # Clamp confidence
+    # Clamps / coercions
     try:
-        conf = int(out_dict.get("confidence", 0) or 0)
-        out_dict["confidence"] = max(0, min(10, conf))
+        out_dict["confidence"] = max(0, min(10, int(out_dict.get("confidence", 0) or 0)))
     except Exception:
         out_dict["confidence"] = 0
 
-    # Normalize nested objects / policy — FIXES THE VALIDATION ERRORS
+    for k in ("categories","missing_categories","needed_to_enter","disqualifiers"):
+        out_dict[k] = _as_list_str(out_dict.get(k, []))
+
+    for k in ("session_block","god_mode_used","force_close"):
+        out_dict[k] = _as_bool(out_dict.get(k, False))
+
+    out_dict["risk_notes"] = _as_str(out_dict.get("risk_notes",""))
+
     for k in ("ema_context","structure_summary","fib_summary","volatility_context","volume_context","model_self_audit"):
         out_dict[k] = _coerce_dict(out_dict.get(k), default={})
+
     out_dict["policy"] = _coerce_policy(out_dict.get("policy"))
 
     # Final validation
@@ -439,6 +490,19 @@ async def gpt_manage(wrapper: TradeWrapper):
     candles_tf2  = (trade.timeframes.tf2  or [])[-5:] if trade.timeframes and trade.timeframes.tf2  else []
     candles_tf3  = (trade.timeframes.tf3  or [])[-5:] if trade.timeframes and trade.timeframes.tf3  else []
 
+    # Safety: inject price_array from candles if EA didn't send it
+    def inject_from_candles(ind: Indicators, candles: list):
+        if not ind:
+            return
+        if (not ind.price_array) and candles:
+            closes = [c.close for c in candles if c and c.close is not None]
+            if closes:
+                ind.price_array = closes[-2:] if len(closes) >= 2 else closes
+
+    inject_from_candles(ind_main, candles_main)
+    inject_from_candles(ind_tf2,  candles_tf2)
+    inject_from_candles(ind_tf3,  candles_tf3)
+
     cross_signal = trade.cross_signal or "none"
     cross_meaning = trade.cross_meaning or "none"
 
@@ -447,12 +511,12 @@ async def gpt_manage(wrapper: TradeWrapper):
     tf_label_tf2  = (trade.tf_names or {}).get("tf2",  "tf2")
     tf_label_tf3  = (trade.tf_names or {}).get("tf3",  "tf3")
 
-    def ema_slope(ind: Indicators):
+    def _ema_slope(ind: Indicators):
         if not ind or not ind.ema_array or len(ind.ema_array) < 2:
             return 0.0
         return (ind.ema_array[-1] or 0.0) - (ind.ema_array[-2] or 0.0)
 
-    def ema_slope_desc(slope, threshold=1e-6):
+    def _ema_slope_desc(slope, threshold=1e-6):
         if slope > threshold:
             return f"sloping up ({slope:.6f})"
         elif slope < -threshold:
@@ -460,52 +524,17 @@ async def gpt_manage(wrapper: TradeWrapper):
         else:
             return f"flat ({slope:.6f})"
 
-    main_slope = ema_slope(ind_main); main_slope_txt = ema_slope_desc(main_slope)
-    tf2_slope  = ema_slope(ind_tf2);  tf2_slope_txt  = ema_slope_desc(tf2_slope)
-    tf3_slope  = ema_slope(ind_tf3);  tf3_slope_txt  = ema_slope_desc(tf3_slope)
+    main_slope = _ema_slope(ind_main); main_slope_txt = _ema_slope_desc(main_slope)
+    tf2_slope  = _ema_slope(ind_tf2);  tf2_slope_txt  = _ema_slope_desc(tf2_slope)
+    tf3_slope  = _ema_slope(ind_tf3);  tf3_slope_txt  = _ema_slope_desc(tf3_slope)
 
-    def atr_norm_slope(slope: float, ind: Indicators) -> float:
+    def _atr_norm_slope(slope: float, ind: Indicators) -> float:
         atr = ind.atr if ind and ind.atr else None
         ref = atr if (atr and atr > 0) else (ind.price_array[-1] if ind and ind.price_array else 1.0)
         ref = abs(ref) if ref else 1.0
         return slope / ref
 
-    def ema_trend(ind: Indicators):
-        if not ind or not ind.ema_array or len(ind.ema_array) < 2:
-            return 0
-        prev_ema = ind.ema_array[-2]
-        curr_ema = ind.ema_array[-1]
-        if curr_ema > prev_ema:
-            return 1
-        elif curr_ema < prev_ema:
-            return -1
-        return 0
-
-    def ema_confirms(ind: Indicators, action: str):
-        if not ind or not ind.ema_array or not ind.price_array:
-            return False
-        price = ind.price_array[-1]
-        ema_last = ind.ema_array[-1]
-        if action == "buy":
-            return (ema_last is not None and price is not None and price > ema_last and ema_trend(ind) == 1)
-        if action == "sell":
-            return (ema_last is not None and price is not None and price < ema_last and ema_trend(ind) == -1)
-        return False
-
-    def infer_tick_tol(ind: Indicators) -> float:
-        price = None
-        if ind and ind.price_array:
-            for v in reversed(ind.price_array):
-                if v:
-                    price = v
-                    break
-        if price is None:
-            return 1e-4
-        s = f"{price:.10f}".rstrip("0")
-        decimals = len(s.split(".")[1]) if "." in s else 2
-        return 10 ** (-(decimals - 1))
-
-    norm_main = atr_norm_slope(main_slope, ind_main)
+    norm_main = _atr_norm_slope(main_slope, ind_main)
     regime = trade.regime or Regime()
     spread_to_sl = trade.spread_to_sl if trade.spread_to_sl is not None else 0.0
     require_sr_tp = bool(trade.require_sr_tp)
@@ -659,6 +688,16 @@ Return JSON EXACTLY like:
 
     try:
         raw = call_gpt_messages(prompt)
+        if not raw or not raw.strip():
+            return JSONResponse(content={
+                "action":"hold","reason":"Empty model response","confidence":0,
+                "categories":[], "recovery_mode": in_recovery_mode,
+                "session_block": False, "force_close": False,
+                "ema_context":{}, "structure_summary":{}, "fib_summary":{},
+                "volatility_context":{}, "volume_context":{}, "risk_notes":"", "policy":"none",
+                "model_self_audit":{"data_used":[],"data_ignored":[],"confidence_rationale":""}
+            })
+
         logging.info(f"📩 GPT raw (truncated): {raw[:800]}")
         decision = extract_json_object(raw) or {"raw": raw}
         action = flatten_action(decision)
@@ -794,8 +833,11 @@ Return JSON EXACTLY like:
             repaired = repair_once(json.dumps(action))
             if repaired is None:
                 validated = DecisionOut(
-                    action="hold", reason="Validation failed and repair unavailable.",
-                    confidence=0, categories=[], recovery_mode=in_recovery_mode
+                    action="hold",
+                    reason="Validation failed and repair unavailable.",
+                    confidence=0,
+                    categories=[],
+                    recovery_mode=in_recovery_mode
                 )
             else:
                 validated = sanitize_and_validate(repaired, "Post-repair", in_recovery_mode)
