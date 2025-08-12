@@ -15,7 +15,7 @@ api_key = os.getenv("OPENAI_API_KEY")
 if not api_key:
     raise RuntimeError("OPENAI_API_KEY environment variable is not set")
 
-# Model config: primary GPT-5, fallback GPT-5-mini only (no GPT-4)
+# Model config: primary GPT-5, fallback GPT-5-mini only
 MODEL_ID = os.getenv("OPENAI_MODEL", "gpt-5")
 FALLBACK_MODEL = os.getenv("OPENAI_FALLBACK_MODEL", "gpt-5-mini")
 
@@ -188,7 +188,6 @@ class DecisionOut(BaseModel):
 
 # === Helpers ===
 def flatten_action(decision: Any) -> Dict[str, Any]:
-    """Accept dict OR string JSON; return a dict with at least action/reason/confidence."""
     if isinstance(decision, dict) and "action" in decision:
         return decision
     if isinstance(decision, str):
@@ -210,7 +209,6 @@ def flatten_action(decision: Any) -> Dict[str, Any]:
     return {"action": "hold", "reason": "Could not decode action.", "confidence": 0}
 
 def extract_json_object(s: str):
-    """Best-effort salvage of a JSON object from a messy string."""
     if not isinstance(s, str):
         return None
     cleaned = re.sub(r"```(?:json|JSON)?", "", s).strip()
@@ -318,14 +316,12 @@ def atr_norm_slope(slope: float, ind: Indicators) -> float:
 ALLOWED_ACTIONS = {"buy", "sell", "hold", "close"}
 
 def sanitize_and_validate(out_dict: Dict[str, Any], fallback_reason: str, in_recovery_mode: bool) -> DecisionOut:
-    # Normalize action
     action = str(out_dict.get("action", "hold")).strip().lower()
     if action not in ALLOWED_ACTIONS:
         action = "hold"
         out_dict["reason"] = (out_dict.get("reason") or "") + " | Action invalid; coerced to HOLD."
     out_dict["action"] = action
 
-    # Ensure fields exist
     out_dict.setdefault("reason", fallback_reason)
     out_dict.setdefault("confidence", 0)
     out_dict.setdefault("categories", [])
@@ -345,7 +341,6 @@ def sanitize_and_validate(out_dict: Dict[str, Any], fallback_reason: str, in_rec
     out_dict.setdefault("model_self_audit", {})
     out_dict["recovery_mode"] = in_recovery_mode
 
-    # Clamp confidence
     try:
         conf = int(out_dict.get("confidence", 0) or 0)
         if conf < 0: conf = 0
@@ -354,7 +349,6 @@ def sanitize_and_validate(out_dict: Dict[str, Any], fallback_reason: str, in_rec
     except Exception:
         out_dict["confidence"] = 0
 
-    # Validate via Pydantic (will raise if off-spec)
     return DecisionOut(**out_dict)
 
 def _gpt_once(prompt: str, model_id: str) -> str:
@@ -364,8 +358,8 @@ def _gpt_once(prompt: str, model_id: str) -> str:
             {"role": "system", "content": "You are an elite, disciplined, risk-aware SCALPER assistant. Reply ONLY in strict JSON. Include 'new_sl' and 'new_tp' for buy/sell. Never include analysis outside the JSON fields requested."},
             {"role": "user", "content": prompt}
         ],
-        # Use max_tokens (not deprecated older names)
-        max_tokens=900,
+        # GPT-5 expects max_completion_tokens (NOT max_tokens)
+        max_completion_tokens=900,
         response_format={"type": "json_object"}
     )
     return chat.choices[0].message.content or ""
@@ -375,14 +369,12 @@ def call_gpt_messages(prompt: str):
         return _gpt_once(prompt, MODEL_ID)
     except Exception as e:
         msg = str(e).lower()
-        # If the primary model fails because of availability/name, try GPT-5-mini once
         if "model_not_found" in msg or "does not exist" in msg or "404" in msg:
             logging.warning(f"Primary model '{MODEL_ID}' unavailable; trying fallback '{FALLBACK_MODEL}'")
             return _gpt_once(prompt, FALLBACK_MODEL)
         raise
 
 def repair_once(raw_content: str) -> Optional[Dict[str, Any]]:
-    """One minimal repair attempt, still JSON-only."""
     repair_prompt = (
         "Repair the following content into EXACTLY one valid JSON object with keys: "
         "action, reason, confidence, lot, new_sl, new_tp, categories, missing_categories, "
@@ -418,9 +410,63 @@ async def gpt_manage(wrapper: TradeWrapper):
     tf_label_tf2  = (trade.tf_names or {}).get("tf2",  "tf2")
     tf_label_tf3  = (trade.tf_names or {}).get("tf3",  "tf3")
 
+    def ema_slope(ind: Indicators):
+        if not ind or not ind.ema_array or len(ind.ema_array) < 2:
+            return 0.0
+        return (ind.ema_array[-1] or 0.0) - (ind.ema_array[-2] or 0.0)
+
+    def ema_slope_desc(slope, threshold=1e-6):
+        if slope > threshold:
+            return f"sloping up ({slope:.6f})"
+        elif slope < -threshold:
+            return f"sloping down ({slope:.6f})"
+        else:
+            return f"flat ({slope:.6f})"
+
     main_slope = ema_slope(ind_main); main_slope_txt = ema_slope_desc(main_slope)
     tf2_slope  = ema_slope(ind_tf2);  tf2_slope_txt  = ema_slope_desc(tf2_slope)
     tf3_slope  = ema_slope(ind_tf3);  tf3_slope_txt  = ema_slope_desc(tf3_slope)
+
+    def atr_norm_slope(slope: float, ind: Indicators) -> float:
+        atr = ind.atr if ind and ind.atr else None
+        ref = atr if (atr and atr > 0) else (ind.price_array[-1] if ind and ind.price_array else 1.0)
+        ref = abs(ref) if ref else 1.0
+        return slope / ref
+
+    def ema_trend(ind: Indicators):
+        if not ind or not ind.ema_array or len(ind.ema_array) < 2:
+            return 0
+        prev_ema = ind.ema_array[-2]
+        curr_ema = ind.ema_array[-1]
+        if curr_ema > prev_ema:
+            return 1
+        elif curr_ema < prev_ema:
+            return -1
+        return 0
+
+    def ema_confirms(ind: Indicators, action: str):
+        if not ind or not ind.ema_array or not ind.price_array:
+            return False
+        price = ind.price_array[-1]
+        ema_last = ind.ema_array[-1]
+        if action == "buy":
+            return (ema_last is not None and price is not None and price > ema_last and ema_trend(ind) == 1)
+        if action == "sell":
+            return (ema_last is not None and price is not None and price < ema_last and ema_trend(ind) == -1)
+        return False
+
+    def infer_tick_tol(ind: Indicators) -> float:
+        price = None
+        if ind and ind.price_array:
+            for v in reversed(ind.price_array):
+                if v:
+                    price = v
+                    break
+        if price is None:
+            return 1e-4
+        s = f"{price:.10f}".rstrip("0")
+        decimals = len(s.split(".")[1]) if "." in s else 2
+        return 10 ** (-(decimals - 1))
 
     norm_main = atr_norm_slope(main_slope, ind_main)
     regime = trade.regime or Regime()
@@ -431,7 +477,6 @@ async def gpt_manage(wrapper: TradeWrapper):
 
     logging.info(f"🔻 RAW PAYLOAD:\n{wrapper.json()}\n---")
 
-    # News override
     if trade.news_override:
         return JSONResponse(content={
             "action": "hold",
@@ -455,7 +500,6 @@ async def gpt_manage(wrapper: TradeWrapper):
             "force_close": False
         })
 
-    # 19:00 UK policy
     if trade.update_type == "session_check_19" or is_uk_at_or_after(19):
         if pos and (pos.pnl or 0.0) > 0.0:
             return JSONResponse(content={
@@ -480,7 +524,6 @@ async def gpt_manage(wrapper: TradeWrapper):
                 "model_self_audit": {"data_used": [], "data_ignored": [], "confidence_rationale": ""}
             })
 
-    # Recovery banner
     recovery_note = ""
     if in_recovery_mode:
         recovery_note = (
@@ -489,7 +532,6 @@ async def gpt_manage(wrapper: TradeWrapper):
             "List the exact categories used.\n---\n"
         )
 
-    # === Prompt ===
     prompt = f"""{recovery_note}
 You are a disciplined prop-firm scalping assistant. Reply in STRICT JSON only.
 
@@ -584,13 +626,11 @@ Return JSON EXACTLY like:
         decision = extract_json_object(raw) or {"raw": raw}
         action = flatten_action(decision)
 
-        # If still missing action, attempt one repair
         if action.get("action") is None or (action.get("action") == "hold" and "Could not decode" in (action.get("reason") or "")):
             repaired = repair_once(raw)
             if repaired:
                 action = repaired
 
-        # Merge categories from explicit list + from the Confluences line
         claimed = set()
         if isinstance(action.get("categories"), list):
             claimed |= {str(x).lower() for x in action["categories"]}
@@ -602,7 +642,6 @@ Return JSON EXACTLY like:
         min_cats = 5 if in_recovery else 4
         min_conf = 8 if in_recovery else 6
 
-        # Confluence line & thresholds for entries
         if action.get("action") in {"buy", "sell"}:
             if "confluences:" not in (action.get("reason", "").lower()):
                 action["action"] = "hold"
@@ -611,7 +650,6 @@ Return JSON EXACTLY like:
                 action["action"] = "hold"
                 action["reason"] = (action.get("reason","") + f" | Confluence requirement not met ({len(claimed)}/{min_cats}).").strip()
 
-        # SL/TP requirement for entries
         if action.get("action") in {"buy", "sell"}:
             if "new_sl" not in action or "new_tp" not in action:
                 action["action"] = "hold"
@@ -623,7 +661,6 @@ Return JSON EXACTLY like:
                 action["action"] = "hold"
                 action["reason"] += " | High spread/SL: TP must be SR/Fib-based (Structure)."
 
-        # Session guards
         if action.get("action") in {"buy", "sell"} and is_between_uk_time(19, 7):
             action["action"] = "hold"
             action["reason"] += " | No new trades between 19:00 and 07:00 UK."
@@ -639,12 +676,33 @@ Return JSON EXACTLY like:
                 action["reason"] += " | No new trades after 17:00 UK Friday."
                 action["session_block"] = True
 
-        # God-mode vs EMA rule (ATR-normalized)
+        def ema_trend_local(ind: Indicators):
+            if not ind or not ind.ema_array or len(ind.ema_array) < 2:
+                return 0
+            prev_ema = ind.ema_array[-2]
+            curr_ema = ind.ema_array[-1]
+            if curr_ema > prev_ema:
+                return 1
+            elif curr_ema < prev_ema:
+                return -1
+            return 0
+
+        def ema_confirms_local(ind: Indicators, action: str):
+            if not ind or not ind.ema_array or not ind.price_array:
+                return False
+            price = ind.price_array[-1]
+            ema_last = ind.ema_array[-1]
+            if action == "buy":
+                return (ema_last is not None and price is not None and price > ema_last and ema_trend_local(ind) == 1)
+            if action == "sell":
+                return (ema_last is not None and price is not None and price < ema_last and ema_trend_local(ind) == -1)
+            return False
+
+        main_trend = ema_trend_local(ind_main)
+        strong_thresh = 0.02
         if action.get("action") in {"buy", "sell"}:
-            main_trend = ema_trend(ind_main)
-            strong_thresh = 0.02  # ATR-normalized slope threshold for "strongly against"
             trend_block = False
-            if not ema_confirms(ind_main, action["action"]):
+            if not ema_confirms_local(ind_main, action["action"]):
                 if action["action"] == "buy" and (main_trend == -1 and norm_main < -strong_thresh):
                     trend_block = True
                 if action["action"] == "sell" and (main_trend == 1 and norm_main > strong_thresh):
@@ -654,30 +712,27 @@ Return JSON EXACTLY like:
                 action["reason"] += " | EMA trend strongly opposes (hard block)."
                 action["god_mode_used"] = False
             else:
-                if not ema_confirms(ind_main, action["action"]):
+                if not ema_confirms_local(ind_main, action["action"]):
                     action["god_mode_used"] = True
                     action["reason"] += " | God-mode: EMA not strongly against — confluence+confidence allow entry."
-                agrees_tf2 = ema_trend(ind_tf2) == (1 if action["action"] == "buy" else -1)
-                agrees_tf3 = ema_trend(ind_tf3) == (1 if action["action"] == "buy" else -1)
+                agrees_tf2 = ema_trend_local(ind_tf2) == (1 if action["action"] == "buy" else -1)
+                agrees_tf3 = ema_trend_local(ind_tf3) == (1 if action["action"] == "buy" else -1)
                 if agrees_tf2 and agrees_tf3:
                     action["confidence"] = int(action.get("confidence", 0)) + 1
                     action["reason"] += " | EMA alignment across main/tf2/tf3. Confidence +1."
 
-        # Pre-22:00 UK: prefer locking profit
         if pos and (pos.pnl or 0.0) > 0 and is_between_uk_time(21, 22) and action.get("action") not in {"close", "hold"}:
             action["action"] = "close"
             action["reason"] += " | Pre-22:00 UK: prefer locking profit."
             action["force_close"] = True
             action["policy"] = "session_exit"
 
-        # Don’t move SL off breakeven
         if pos and action.get("action") and "new_sl" in action and pos.open_price is not None and pos.sl is not None:
             tick_tol = infer_tick_tol(ind_main)
             if abs(pos.sl - pos.open_price) <= tick_tol:
                 action["new_sl"] = pos.sl
                 action["reason"] += " | SL at breakeven; not moving SL."
 
-        # Ensure rich fields exist for panel
         action.setdefault("ema_context", {
             "period": ema_period,
             "price_vs_ema": "unknown",
@@ -694,14 +749,12 @@ Return JSON EXACTLY like:
         action.setdefault("model_self_audit", {"data_used": [], "data_ignored": [], "confidence_rationale": ""})
         action["recovery_mode"] = in_recovery_mode
 
-        # Final validation & clamp
         try:
             validated = sanitize_and_validate(action, "Validated output", in_recovery_mode)
         except ValidationError as ve:
             logging.warning(f"ValidationError -> attempting repair once. {ve}")
             repaired = repair_once(json.dumps(action))
             if repaired is None:
-                # Hard fallback
                 validated = DecisionOut(
                     action="hold", reason="Validation failed and repair unavailable.",
                     confidence=0, categories=[], recovery_mode=in_recovery_mode
