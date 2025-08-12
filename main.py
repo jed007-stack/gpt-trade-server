@@ -2,20 +2,24 @@ from fastapi import FastAPI
 from pydantic import BaseModel, Field, ValidationError, conint, confloat
 from typing import List, Optional, Dict, Any, Literal
 from fastapi.responses import JSONResponse
-import openai
 import os
 import logging
 import json
 import re
 from datetime import datetime, time
 import pytz
+from openai import OpenAI
 
 # === Setup ===
 api_key = os.getenv("OPENAI_API_KEY")
 if not api_key:
     raise RuntimeError("OPENAI_API_KEY environment variable is not set")
 
-openai_client = openai.OpenAI(api_key=api_key)
+# Model config: primary GPT-5, fallback GPT-5-mini only (no GPT-4)
+MODEL_ID = os.getenv("OPENAI_MODEL", "gpt-5")
+FALLBACK_MODEL = os.getenv("OPENAI_FALLBACK_MODEL", "gpt-5-mini")
+
+openai_client = OpenAI(api_key=api_key)
 
 app = FastAPI()
 logging.basicConfig(level=logging.INFO)
@@ -203,16 +207,13 @@ def flatten_action(decision: Any) -> Dict[str, Any]:
                 return d
         except Exception:
             pass
-    # neutral, schema-safe fallback (no old "Could not decode action.")
-    return {"action": "hold", "reason": "malformed_json", "confidence": 0}
+    return {"action": "hold", "reason": "Could not decode action.", "confidence": 0}
 
 def extract_json_object(s: str):
-    """Extract first JSON object, even if wrapped, fenced, or with BOM."""
+    """Best-effort salvage of a JSON object from a messy string."""
     if not isinstance(s, str):
         return None
-    s = s.lstrip("\ufeff")  # BOM
-    cleaned = re.sub(r"```(?:json|JSON)?", "", s)
-    cleaned = cleaned.replace("```", "").strip()
+    cleaned = re.sub(r"```(?:json|JSON)?", "", s).strip()
     start = cleaned.find("{")
     end = cleaned.rfind("}")
     if start == -1 or end == -1 or end <= start:
@@ -222,8 +223,8 @@ def extract_json_object(s: str):
         return json.loads(chunk)
     except Exception:
         try:
-            chunk = re.sub(r",\s*([}\]])", r"\1", chunk)
-            return json.loads(chunk)
+            no_trailing_commas = re.sub(r",\s*([}\]])", r"\1", chunk)
+            return json.loads(no_trailing_commas)
         except Exception:
             return None
 
@@ -313,7 +314,7 @@ def atr_norm_slope(slope: float, ind: Indicators) -> float:
     return slope / ref
 
 
-# === Chat call + repair ===
+# === Chat call + repair (GPT-5 primary, GPT-5-mini fallback) ===
 ALLOWED_ACTIONS = {"buy", "sell", "hold", "close"}
 
 def sanitize_and_validate(out_dict: Dict[str, Any], fallback_reason: str, in_recovery_mode: bool) -> DecisionOut:
@@ -356,42 +357,43 @@ def sanitize_and_validate(out_dict: Dict[str, Any], fallback_reason: str, in_rec
     # Validate via Pydantic (will raise if off-spec)
     return DecisionOut(**out_dict)
 
-def call_gpt_messages(prompt: str):
+def _gpt_once(prompt: str, model_id: str) -> str:
     chat = openai_client.chat.completions.create(
-        model="gpt-5-thinking",  # force GPT-5 Thinking
+        model=model_id,
         messages=[
-            {
-                "role": "system",
-                "content": (
-                    "You are a trading decision engine. "
-                    "Reply with a SINGLE JSON object only. "
-                    "Schema keys: action, reason, confidence, lot, new_sl, new_tp, categories, "
-                    "missing_categories, needed_to_enter, disqualifiers, session_block, "
-                    "god_mode_used, force_close, ema_context, structure_summary, fib_summary, "
-                    "volatility_context, volume_context, risk_notes, policy, recovery_mode, "
-                    "model_self_audit. No prose. No markdown. No code fences."
-                ),
-            },
-            {"role": "user", "content": prompt},
+            {"role": "system", "content": "You are an elite, disciplined, risk-aware SCALPER assistant. Reply ONLY in strict JSON. Include 'new_sl' and 'new_tp' for buy/sell. Never include analysis outside the JSON fields requested."},
+            {"role": "user", "content": prompt}
         ],
-        temperature=0.1,
-        max_completion_tokens=900,
-        response_format={"type": "json_object"},
+        # Use max_tokens (not deprecated older names)
+        max_tokens=900,
+        response_format={"type": "json_object"}
     )
     return chat.choices[0].message.content or ""
 
+def call_gpt_messages(prompt: str):
+    try:
+        return _gpt_once(prompt, MODEL_ID)
+    except Exception as e:
+        msg = str(e).lower()
+        # If the primary model fails because of availability/name, try GPT-5-mini once
+        if "model_not_found" in msg or "does not exist" in msg or "404" in msg:
+            logging.warning(f"Primary model '{MODEL_ID}' unavailable; trying fallback '{FALLBACK_MODEL}'")
+            return _gpt_once(prompt, FALLBACK_MODEL)
+        raise
+
 def repair_once(raw_content: str) -> Optional[Dict[str, Any]]:
     """One minimal repair attempt, still JSON-only."""
-    prompt = (
-        "Return EXACTLY one valid JSON object with keys: "
+    repair_prompt = (
+        "Repair the following content into EXACTLY one valid JSON object with keys: "
         "action, reason, confidence, lot, new_sl, new_tp, categories, missing_categories, "
         "needed_to_enter, disqualifiers, session_block, god_mode_used, force_close, "
         "ema_context, structure_summary, fib_summary, volatility_context, volume_context, "
         "risk_notes, policy, recovery_mode, model_self_audit. "
-        "Allowed actions: buy, sell, hold, close. ONLY the JSON follows:\n\n"
-        f"{raw_content}"
+        "Values may be empty/null but the object MUST be valid JSON. "
+        "Allowed actions: buy, sell, hold, close. Return ONLY the JSON.\n\n"
+        f"<raw>{raw_content}</raw>"
     )
-    fixed = call_gpt_messages(prompt)
+    fixed = call_gpt_messages(repair_prompt)
     return extract_json_object(fixed)
 
 # === Core endpoint ===
@@ -583,7 +585,7 @@ Return JSON EXACTLY like:
         action = flatten_action(decision)
 
         # If still missing action, attempt one repair
-        if action.get("action") is None or (action.get("action") == "hold" and "malformed_json" in (action.get("reason") or "")):
+        if action.get("action") is None or (action.get("action") == "hold" and "Could not decode" in (action.get("reason") or "")):
             repaired = repair_once(raw)
             if repaired:
                 action = repaired
@@ -738,5 +740,5 @@ Return JSON EXACTLY like:
 @app.get("/")
 async def root():
     return {
-        "message": "SmartGPT EA SCALPER — GPT-5 Thinking, regime+spread aware, tf2/tf3, evidence audit & counterfactuals, ATR-normalized EMA guard, 19:00 UK profit close, strict confluences, God-mode (soft), session guards, recovery mode, JSON hard-validate+repair."
+        "message": "SmartGPT EA SCALPER — GPT-5 primary, GPT-5-mini fallback, regime+spread aware, tf2/tf3, evidence audit & counterfactuals, ATR-normalized EMA guard, 19:00 UK profit close, strict confluences, God-mode (soft), session guards, recovery mode, JSON hard-validate+repair."
     }
