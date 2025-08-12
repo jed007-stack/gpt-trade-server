@@ -1,4 +1,4 @@
-# main.py — SmartGPT EA Server (hardened)
+# main.py — SmartGPT EA Server (gpt-4o, hardened)
 from fastapi import FastAPI
 from pydantic import BaseModel, ValidationError, conint, confloat
 from typing import List, Optional, Dict, Any, Literal
@@ -16,9 +16,9 @@ api_key = os.getenv("OPENAI_API_KEY")
 if not api_key:
     raise RuntimeError("OPENAI_API_KEY environment variable is not set")
 
-# Model config: primary GPT-5, fallback GPT-5-mini only
-MODEL_ID = os.getenv("OPENAI_MODEL", "gpt-5")
-FALLBACK_MODEL = os.getenv("OPENAI_FALLBACK_MODEL", "gpt-5-mini")
+# Model config: primary gpt-4o, fallback gpt-4o-mini
+MODEL_ID = os.getenv("OPENAI_MODEL", "gpt-4o")
+FALLBACK_MODEL = os.getenv("OPENAI_FALLBACK_MODEL", "gpt-4o-mini")
 
 openai_client = OpenAI(api_key=api_key)
 
@@ -95,28 +95,25 @@ class Regime(BaseModel):
 class TradeData(BaseModel):
     symbol: str
     timeframe: str
-    update_type: Optional[str] = None       # e.g., "ema_over_lwma", "session_check_19"
+    update_type: Optional[str] = None
     cross_signal: Optional[str] = None
     cross_meaning: Optional[str] = None
 
-    indicators: Optional[Indicators] = None       # main TF
-    tf2_indicators: Optional[Indicators] = None   # tf2
-    tf3_indicators: Optional[Indicators] = None   # tf3
+    indicators: Optional[Indicators] = None
+    tf2_indicators: Optional[Indicators] = None
+    tf3_indicators: Optional[Indicators] = None
     timeframes: Optional[Timeframes] = None
-    tf_names: Optional[Dict[str, str]] = None     # {"main":"M5","tf2":"M15","tf3":"H1"}
+    tf_names: Optional[Dict[str, str]] = None
 
     position: Optional[Position] = None
     account: Optional[Account] = None
 
-    # Session/news & recovery
     news_override: Optional[bool] = False
     last_trade_was_loss: Optional[bool] = False
     unrecovered_loss: Optional[float] = 0.0
 
-    # Crossover signal from EA
     strong_crossover: Optional[bool] = False
 
-    # NEW: microstructure context from EA
     regime: Optional[Regime] = None
     spread_pips: Optional[float] = None
     spread_to_sl: Optional[float] = None
@@ -192,7 +189,6 @@ ALLOWED_ACTIONS = {"buy", "sell", "hold", "close"}
 ALLOWED_POLICIES = {"none", "session_exit", "friday_exit", "news_conflict"}
 
 def _coerce_dict(x, default=None):
-    """Ensure nested objects are dicts (handle '', '{}', None)."""
     if isinstance(x, dict):
         return x
     if isinstance(x, str):
@@ -216,8 +212,6 @@ def _coerce_policy(p):
         p = "none"
     return p if p in ALLOWED_POLICIES else "none"
 
-# NEW: robust coercers to stop Pydantic crashes
-
 def _as_bool(x):
     if isinstance(x, bool):
         return x
@@ -227,12 +221,10 @@ def _as_bool(x):
         return x.strip().lower() in {"1","true","t","yes","y"}
     return False
 
-
 def _as_str(x):
     if x is None:
         return ""
     return x if isinstance(x, str) else json.dumps(x, ensure_ascii=False)
-
 
 def _as_list_str(x):
     if x is None:
@@ -242,7 +234,6 @@ def _as_list_str(x):
     if isinstance(x, str):
         return [x]
     return [str(x)]
-
 
 def flatten_action(decision: Any) -> Dict[str, Any]:
     if isinstance(decision, dict) and "action" in decision:
@@ -265,7 +256,6 @@ def flatten_action(decision: Any) -> Dict[str, Any]:
             pass
     return {"action": "hold", "reason": "Could not decode action.", "confidence": 0}
 
-
 def extract_json_object(s: str):
     if not isinstance(s, str):
         return None
@@ -284,12 +274,10 @@ def extract_json_object(s: str):
         except Exception:
             return None
 
-
 def uk_time_now():
     utc_now = datetime.utcnow()
     london = pytz.timezone('Europe/London')
     return utc_now.replace(tzinfo=pytz.utc).astimezone(london)
-
 
 def is_between_uk_time(start_h, end_h):
     now = uk_time_now().time()
@@ -298,15 +286,12 @@ def is_between_uk_time(start_h, end_h):
     else:
         return now >= time(start_h, 0) or now < time(end_h, 0)
 
-
 def is_friday_5pm_or_later():
     now = uk_time_now()
     return now.weekday() == 4 and now.time() >= time(17, 0)
 
-
 def is_uk_at_or_after(hour_24):
     return uk_time_now().time() >= time(hour_24, 0)
-
 
 def extract_categories(reason):
     m = re.search(r"Confluences?:\s*([^.]+)", reason or "", re.IGNORECASE)
@@ -320,7 +305,6 @@ def extract_categories(reason):
     return found
 
 # === EMA helpers ===
-
 def ema_trend(ind: Indicators):
     if not ind or not ind.ema_array or len(ind.ema_array) < 2:
         return 0
@@ -332,12 +316,10 @@ def ema_trend(ind: Indicators):
         return -1
     return 0
 
-
 def ema_slope(ind: Indicators):
     if not ind or not ind.ema_array or len(ind.ema_array) < 2:
         return 0.0
     return (ind.ema_array[-1] or 0.0) - (ind.ema_array[-2] or 0.0)
-
 
 def ema_slope_desc(slope, threshold=1e-6):
     if slope > threshold:
@@ -346,7 +328,6 @@ def ema_slope_desc(slope, threshold=1e-6):
         return f"sloping down ({slope:.6f})"
     else:
         return f"flat ({slope:.6f})"
-
 
 def ema_confirms(ind: Indicators, action: str):
     if not ind or not ind.ema_array or not ind.price_array:
@@ -358,7 +339,6 @@ def ema_confirms(ind: Indicators, action: str):
     if action == "sell":
         return (ema_last is not None and price is not None and price < ema_last and ema_trend(ind) == -1)
     return False
-
 
 def infer_tick_tol(ind: Indicators) -> float:
     price = None
@@ -373,7 +353,6 @@ def infer_tick_tol(ind: Indicators) -> float:
     decimals = len(s.split(".")[1]) if "." in s else 2
     return 10 ** (-(decimals - 1))
 
-
 def atr_norm_slope(slope: float, ind: Indicators) -> float:
     atr = ind.atr if ind and ind.atr else None
     ref = atr if (atr and atr > 0) else (ind.price_array[-1] if ind and ind.price_array else 1.0)
@@ -381,8 +360,7 @@ def atr_norm_slope(slope: float, ind: Indicators) -> float:
     return slope / ref
 
 
-# === Chat call + repair (GPT-5 primary, GPT-5-mini fallback) ===
-
+# === Chat call + repair (gpt-4o primary, gpt-4o-mini fallback) ===
 def _gpt_once(prompt: str, model_id: str) -> str:
     chat = openai_client.chat.completions.create(
         model=model_id,
@@ -390,12 +368,10 @@ def _gpt_once(prompt: str, model_id: str) -> str:
             {"role": "system", "content": "You are an elite, disciplined, risk-aware SCALPER assistant. Reply ONLY in strict JSON. Include 'new_sl' and 'new_tp' for buy/sell. Never include analysis outside the JSON fields requested. For object fields, return JSON objects (e.g., {}) not strings."},
             {"role": "user", "content": prompt}
         ],
-        # GPT-5 expects max_completion_tokens (NOT max_tokens)
-        max_completion_tokens=2500,
+        max_tokens=2500,  # gpt-4o uses max_tokens
         response_format={"type": "json_object"}
     )
     return chat.choices[0].message.content or ""
-
 
 def call_gpt_messages(prompt: str):
     try:
@@ -406,7 +382,6 @@ def call_gpt_messages(prompt: str):
             logging.warning(f"Primary model '{MODEL_ID}' unavailable; trying fallback '{FALLBACK_MODEL}'")
             return _gpt_once(prompt, FALLBACK_MODEL)
         raise
-
 
 def repair_once(raw_content: str) -> Optional[Dict[str, Any]]:
     repair_prompt = (
@@ -424,16 +399,13 @@ def repair_once(raw_content: str) -> Optional[Dict[str, Any]]:
 
 
 # === Coercion + Validation ===
-
 def sanitize_and_validate(out_dict: Dict[str, Any], fallback_reason: str, in_recovery_mode: bool) -> DecisionOut:
-    # Action clamp
     action = str(out_dict.get("action", "hold")).strip().lower()
     if action not in ALLOWED_ACTIONS:
         action = "hold"
         out_dict["reason"] = (out_dict.get("reason") or "") + " | Action invalid; coerced to HOLD."
     out_dict["action"] = action
 
-    # Defaults
     out_dict.setdefault("reason", fallback_reason)
     out_dict.setdefault("confidence", 0)
     out_dict.setdefault("categories", [])
@@ -453,7 +425,6 @@ def sanitize_and_validate(out_dict: Dict[str, Any], fallback_reason: str, in_rec
     out_dict.setdefault("model_self_audit", {})
     out_dict["recovery_mode"] = in_recovery_mode
 
-    # Clamps / coercions
     try:
         out_dict["confidence"] = max(0, min(10, int(out_dict.get("confidence", 0) or 0)))
     except Exception:
@@ -472,7 +443,6 @@ def sanitize_and_validate(out_dict: Dict[str, Any], fallback_reason: str, in_rec
 
     out_dict["policy"] = _coerce_policy(out_dict.get("policy"))
 
-    # Final validation
     return DecisionOut(**out_dict)
 
 
@@ -490,7 +460,6 @@ async def gpt_manage(wrapper: TradeWrapper):
     candles_tf2  = (trade.timeframes.tf2  or [])[-5:] if trade.timeframes and trade.timeframes.tf2  else []
     candles_tf3  = (trade.timeframes.tf3  or [])[-5:] if trade.timeframes and trade.timeframes.tf3  else []
 
-    # Safety: inject price_array from candles if EA didn't send it
     def inject_from_candles(ind: Indicators, candles: list):
         if not ind:
             return
@@ -809,7 +778,6 @@ Return JSON EXACTLY like:
                 action["new_sl"] = pos.sl
                 action["reason"] += " | SL at breakeven; not moving SL."
 
-        # Ensure defaults + coercion before validation
         action.setdefault("ema_context", {
             "period": ema_period,
             "price_vs_ema": "unknown",
@@ -847,7 +815,6 @@ Return JSON EXACTLY like:
 
     except Exception as e:
         logging.error(f"❌ GPT Error: {str(e)}")
-        # ensure in_recovery_mode exists for error path
         in_recovery_mode = bool(trade.last_trade_was_loss or (trade.unrecovered_loss or 0.0) > 0.0)
         return JSONResponse(content={
             "action": "hold",
@@ -875,5 +842,5 @@ Return JSON EXACTLY like:
 @app.get("/")
 async def root():
     return {
-        "message": "SmartGPT EA SCALPER — GPT-5 primary, GPT-5-mini fallback, regime+spread aware, tf2/tf3, evidence audit & counterfactuals, ATR-normalized EMA guard, 19:00 UK profit close, strict confluences, God-mode (soft), session guards, recovery mode, JSON hard-validate+repair."
+        "message": "SmartGPT EA SCALPER — gpt-4o primary, gpt-4o-mini fallback, regime+spread aware, tf2/tf3, evidence audit & counterfactuals, ATR-normalized EMA guard, 19:00 UK profit close, strict confluences, God-mode (soft), session guards, recovery mode, JSON hard-validate+repair."
     }
