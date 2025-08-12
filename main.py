@@ -359,7 +359,7 @@ def _gpt_once(prompt: str, model_id: str) -> str:
             {"role": "user", "content": prompt}
         ],
         # GPT-5 expects max_completion_tokens (NOT max_tokens)
-        max_completion_tokens=900,
+        max_completion_tokens=2500,
         response_format={"type": "json_object"}
     )
     return chat.choices[0].message.content or ""
