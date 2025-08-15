@@ -1,4 +1,4 @@
-# main.py — SmartGPT EA Server (gpt-4o only, no retries)
+# main.py — SmartGPT EA Server (gpt-4o only, no retries) + Low-Volatility Trend Trap Filters
 from fastapi import FastAPI
 from pydantic import BaseModel, ValidationError, conint, confloat
 from typing import List, Optional, Dict, Any, Literal
@@ -365,6 +365,102 @@ def atr_norm_slope(slope: float, ind: Indicators) -> float:
     ref = abs(ref) if ref else 1.0
     return slope / ref
 
+# === VOL/MOM/BB helpers for Low-Volatility Trend Trap ===
+def bb_width(ind: Indicators) -> Optional[float]:
+    if not ind or ind.bb_upper is None or ind.bb_lower is None or ind.bb_middle is None:
+        return None
+    mid = ind.bb_middle if ind.bb_middle != 0 else 1.0
+    return abs(ind.bb_upper - ind.bb_lower) / abs(mid)
+
+def classify_bb_state(ind: Indicators) -> str:
+    # If regime.bb_width is supplied upstream, EA can send it; else derive from bands
+    w = bb_width(ind)
+    if w is None:
+        return "neutral"
+    # Heuristic thresholds work well M5/M15: tweak upstream if needed
+    if w < 0.002:  # very narrow
+        return "squeeze"
+    if w > 0.005:  # clearly expanding
+        return "expansion"
+    return "neutral"
+
+def macd_hist(ind: Indicators) -> Optional[float]:
+    if not ind or not ind.macd or ind.macd.main is None or ind.macd.signal is None:
+        return None
+    return ind.macd.main - ind.macd.signal
+
+def rsi_latest(ind: Indicators) -> Optional[float]:
+    if not ind or not ind.rsi_array or len(ind.rsi_array) == 0:
+        return None
+    return ind.rsi_array[-1]
+
+def rsi_prev(ind: Indicators) -> Optional[float]:
+    if not ind or not ind.rsi_array or len(ind.rsi_array) < 2:
+        return None
+    return ind.rsi_array[-2]
+
+def momentum_exhausted_buy(ind_main: Indicators, ind_tf2: Indicators) -> bool:
+    # Overbought stoch OR RSI rolling over OR MACD hist declining (if tf2 present as proxy for "was higher")
+    stoch_over = (ind_main.stoch_k or 0) >= 75
+    rsi_now, rsi_was = rsi_latest(ind_main), rsi_prev(ind_main)
+    rsi_roll = (rsi_now is not None and rsi_was is not None and rsi_was >= 55 and rsi_now < rsi_was)
+    # Use tf2 MACD as "prior momentum" if main.hist present but cannot compare prev; otherwise skip
+    hist_main = macd_hist(ind_main)
+    hist_tf2  = macd_hist(ind_tf2)
+    macd_fading = (hist_main is not None and hist_tf2 is not None and hist_main <= hist_tf2)
+    return stoch_over or rsi_roll or macd_fading
+
+def momentum_exhausted_sell(ind_main: Indicators, ind_tf2: Indicators) -> bool:
+    stoch_over = (ind_main.stoch_k or 100) <= 25
+    rsi_now, rsi_was = rsi_latest(ind_main), rsi_prev(ind_main)
+    rsi_roll = (rsi_now is not None and rsi_was is not None and rsi_was <= 45 and rsi_now > rsi_was)
+    hist_main = macd_hist(ind_main)
+    hist_tf2  = macd_hist(ind_tf2)
+    macd_fading = (hist_main is not None and hist_tf2 is not None and hist_main >= hist_tf2)
+    return stoch_over or rsi_roll or macd_fading
+
+def adx_ok_and_rising(action: str, ind_main: Indicators, ind_tf2: Indicators) -> bool:
+    a_main = ind_main.adx or 0.0
+    a_tf2  = ind_tf2.adx if (ind_tf2 and ind_tf2.adx is not None) else None
+    # Need >=25 and (rising vs tf2 if available)
+    if a_main < 25.0:
+        return False
+    if a_tf2 is not None and a_main <= a_tf2:
+        return False
+    return True
+
+def volume_confirm_buy(ind_main: Indicators, ind_tf2: Indicators) -> bool:
+    m_main = ind_main.mfi
+    m_tf2  = ind_tf2.mfi if ind_tf2 else None
+    if m_main is None:
+        return False
+    # prefer >60 and rising vs tf2 if available
+    if m_main < 60.0:
+        return False
+    if m_tf2 is not None and m_main <= m_tf2:
+        return False
+    return True
+
+def volume_confirm_sell(ind_main: Indicators, ind_tf2: Indicators) -> bool:
+    m_main = ind_main.mfi
+    m_tf2  = ind_tf2.mfi if ind_tf2 else None
+    if m_main is None:
+        return False
+    if m_main > 40.0:
+        return False
+    if m_tf2 is not None and m_main >= m_tf2:
+        return False
+    return True
+
+def bb_expanding(ind_main: Indicators, ind_tf2: Indicators) -> bool:
+    w_main = bb_width(ind_main)
+    w_tf2  = bb_width(ind_tf2)
+    if w_main is None:
+        return False
+    if w_tf2 is None:
+        # Fallback: treat "expansion" classification as expanding
+        return classify_bb_state(ind_main) == "expansion"
+    return w_main > w_tf2  # current width greater than prior timeframe's width -> expansion bias
 
 # === Chat call (single shot, no retry, no fallback) ===
 def _gpt_once(prompt: str) -> str:
@@ -597,12 +693,11 @@ HARD RULES:
 - ABSOLUTE TREND: BUY only if EMA {ema_period} slopes up AND price>EMA; SELL only if slopes down AND price<EMA.
 - GOD-MODE: Allowed only if EMA is NOT strongly against. If used, set god_mode_used=true and justify.
 - Entries need at least {"5" if in_recovery_mode else "4"} categories and confidence ≥ {"8" if in_recovery_mode else "6"}.
-- No new trades 19:00–07:00 UK and after 17:00 UK Friday (set session_block=true and HOLD unless closing profits).
+- No new trades 19:00–07:00 UK and after 17:00 UK Friday (set session_block=true).
 
 SL/TP:
 - SL beyond last swing or ≥1xATR (state which, with numbers).
 - TP ≥2xSL or next S/R/Fib (state which, with numbers). If require_sr_tp=true, TP must be SR/Fib-based.
-- Always return numeric new_sl/new_tp for entries.
 
 SLOPES ({tf_label_main}/{tf_label_tf2}/{tf_label_tf3}):
 - {tf_label_main} EMA {ema_period}: {main_slope_txt}
@@ -768,6 +863,25 @@ Return JSON EXACTLY like:
                     action["confidence"] = int(action.get("confidence", 0)) + 1
                     action["reason"] += " | EMA alignment across main/tf2/tf3. Confidence +1."
 
+        # === Low-Volatility Trend Trap (skip late continuation without expansion) ===
+        if action.get("action") in {"buy", "sell"}:
+            bb_state_main = classify_bb_state(ind_main)
+            is_neutral = (bb_state_main == "neutral")
+            expanding = bb_expanding(ind_main, ind_tf2)
+
+            # ADX rising + volume rising confirmations
+            adx_rising = adx_ok_and_rising(action["action"], ind_main, ind_tf2)
+            vol_conf = volume_confirm_buy(ind_main, ind_tf2) if action["action"] == "buy" else volume_confirm_sell(ind_main, ind_tf2)
+
+            # Momentum exhaustion checks
+            mom_exh = momentum_exhausted_buy(ind_main, ind_tf2) if action["action"] == "buy" else momentum_exhausted_sell(ind_main, ind_tf2)
+
+            # Trap condition: neutral BB + momentum exhausted + NOT (ADX rising AND BB expanding AND volume confirming)
+            if is_neutral and mom_exh and not (adx_rising and expanding and vol_conf):
+                action["reason"] += " | Low-Volatility Trend Trap: BB neutral + momentum exhaustion with no expansion/ADX rise/volume push."
+                action["disqualifiers"] = _as_list_str(action.get("disqualifiers", [])) + ["low_vol_trend_trap"]
+                action["action"] = "hold"
+
         # Pre-22:00 UK profit lock preference
         if pos and (pos.pnl or 0.0) > 0 and is_between_uk_time(21, 22) and action.get("action") not in {"close", "hold"}:
             action["action"] = "close"
@@ -791,7 +905,7 @@ Return JSON EXACTLY like:
         })
         action.setdefault("structure_summary", {"sr_levels": [], "last_reversal": "none"})
         action.setdefault("fib_summary", {"high": 0.0, "low": 0.0, "active_levels": []})
-        action.setdefault("volatility_context", {"atr": float(ind_main.atr or 0.0), "bb_state": "neutral"})
+        action.setdefault("volatility_context", {"atr": float(ind_main.atr or 0.0), "bb_state": classify_bb_state(ind_main)})
         action.setdefault("volume_context", {"mfi": float(ind_main.mfi or 0.0), "state": "unknown"})
         action.setdefault("risk_notes", "")
         action.setdefault("policy", "none")
@@ -843,5 +957,5 @@ Return JSON EXACTLY like:
 @app.get("/")
 async def root():
     return {
-        "message": "SmartGPT EA SCALPER — gpt-4o only (no fallback, no retries), regime+spread aware, tf2/tf3, evidence audit & counterfactuals, ATR-normalized EMA guard, 19:00 UK profit close, strict confluences, soft God-mode, session guards, recovery mode, JSON hard-validate."
+        "message": "SmartGPT EA SCALPER — gpt-4o only (no fallback, no retries), regime+spread aware, tf2/tf3, evidence audit & counterfactuals, ATR-normalized EMA guard, 19:00 UK profit close, strict confluences, soft God-mode, session guards, recovery mode, JSON hard-validate, plus Low-Volatility Trend Trap filters."
     }
