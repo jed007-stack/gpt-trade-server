@@ -1,799 +1,248 @@
-# main.py — SmartGPT EA Server (adaptive, no crossover dependency)
-# - Matches SmartGPT_EA_Adaptive.mq5 payload / flow
-# - gpt-4o only, single-shot, strict JSON
-# - Confluence gate, Low-Volatility Trend Trap, session/news guards, recovery mode
+# main.py — GPT webhook for XAUUSD_Pro_GM_ORB_AVWAP_GPT.mq5
+# FastAPI server that ingests EA payload and returns: open_long/open_short/modify/close/hold
+# Decision = tech readiness + AB=CD waves + optional sentiment, with hard risk guards.
 
-from fastapi import FastAPI
-from pydantic import BaseModel, conint, confloat, ValidationError
-from typing import List, Optional, Dict, Any, Literal
+from __future__ import annotations
+from typing import Any, Dict, Optional
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
 from fastapi.responses import JSONResponse
-from datetime import datetime, time
-import os, json, re, logging, pytz
-from openai import OpenAI
+import os, time, math
 
-# ========= Setup =========
-api_key = os.getenv("OPENAI_API_KEY")
-if not api_key:
-    raise RuntimeError("OPENAI_API_KEY is not set")
+# ---------------- Env / knobs ----------------
+SYMBOL_ALLOW = set(os.getenv("SYMBOL_ALLOW", "XAUUSD,XAUUSD.m,XAUUSD_i").split(","))
 
-MODEL_ID = os.getenv("OPENAI_MODEL", "gpt-4o")
-openai_client = OpenAI(api_key=api_key)
+# weights (0..1). They are normalized implicitly by thresholds below.
+SENTI_WEIGHT = float(os.getenv("SENTI_WEIGHT", "0.35"))
+WAVE_WEIGHT  = float(os.getenv("WAVE_WEIGHT",  "0.40"))
+TECH_WEIGHT  = float(os.getenv("TECH_WEIGHT",  "0.25"))
 
-app = FastAPI()
-logging.basicConfig(level=logging.INFO)
+# thresholds
+OPEN_TREND_OR_BREAKOUT = float(os.getenv("OPEN_TREND_OR_BREAKOUT", "0.55"))
+OPEN_RANGE             = float(os.getenv("OPEN_RANGE",             "0.70"))
+OPEN_INDECISION        = float(os.getenv("OPEN_INDECISION",        "0.75"))
+MIN_ADX_SHORT          = float(os.getenv("MIN_ADX_SHORT",          "24.0"))
+HARD_STOP_R_MULT       = float(os.getenv("HARD_STOP_R_MULT",       "1.30"))  # close if r_now <= -1.3R
+TRAIL_START_R          = float(os.getenv("TRAIL_START_R",          "1.40"))  # mirrors EA
 
-REASON_MAXLEN = 900
+# simple in-memory sentiment (optional)
+GLOBAL_SENTIMENT = {"bull": 0.5, "bear": 0.5, "ts": time.time()}
 
-# ========= Incoming schema =========
-class MACD(BaseModel):
-    main: Optional[float] = None
-    signal: Optional[float] = None
+# ---------------- API scaffolding -------------
+app = FastAPI(title="GM GPT Trade Server", version="1.0")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], allow_methods=["*"], allow_headers=["*"], allow_credentials=False
+)
 
-class Ichimoku(BaseModel):
-    tenkan: Optional[float] = None
-    kijun: Optional[float] = None
-    senkou_a: Optional[float] = None
-    senkou_b: Optional[float] = None
-
-class Indicators(BaseModel):
-    bb_upper: Optional[float] = None
-    bb_middle: Optional[float] = None
-    bb_lower: Optional[float] = None
-    stoch_k: Optional[float] = None
-    stoch_d: Optional[float] = None
-    stoch_j: Optional[float] = None
-    macd: Optional[MACD] = None
-    ema: Optional[float] = None
-    ema_period: Optional[int] = None
-    ema_array: Optional[List[float]] = None
-    lwma: Optional[float] = None
-    lwma_period: Optional[int] = None
-    adx: Optional[float] = None
-    mfi: Optional[float] = None
-    williams_r: Optional[float] = None
-    ichimoku: Optional[Ichimoku] = None
-    rsi_array: Optional[List[float]] = None
-    price_array: Optional[List[float]] = None
-    support_resistance: Optional[Dict[str, List[float]]] = None
-    fibonacci: Optional[Dict[str, Any]] = None
-    candlestick_patterns: Optional[List[str]] = None
-    atr: Optional[float] = None
-
-class Candle(BaseModel):
-    open: Optional[float] = None
-    high: Optional[float] = None
-    low: Optional[float] = None
-    close: Optional[float] = None
-    volume: Optional[float] = None
-
-class Position(BaseModel):
-    direction: Optional[str] = None
-    open_price: Optional[float] = None
+# ---------------- Outgoing schema -------------
+class OrdersOut(BaseModel):
     sl: Optional[float] = None
     tp: Optional[float] = None
-    lot: Optional[float] = None
-    pnl: Optional[float] = None
-
-class Account(BaseModel):
-    balance: Optional[float] = None
-    equity: Optional[float] = None
-    margin: Optional[float] = None
-
-class Timeframes(BaseModel):
-    main: Optional[List[Candle]] = None
-    tf2: Optional[List[Candle]] = None
-    tf3: Optional[List[Candle]] = None
-
-class Regime(BaseModel):
-    label: Optional[str] = None
-    bb_width: Optional[float] = None
-    slope_pct: Optional[float] = None
-    adx: Optional[float] = None
-
-class TradeData(BaseModel):
-    symbol: str
-    timeframe: str
-    update_type: Optional[str] = None
-
-    cross_signal: Optional[str] = None   # kept for compatibility (EA sends "none")
-    cross_meaning: Optional[str] = None
-
-    indicators: Optional[Indicators] = None
-    tf2_indicators: Optional[Indicators] = None
-    tf3_indicators: Optional[Indicators] = None
-
-    timeframes: Optional[Timeframes] = None
-    tf_names: Optional[Dict[str, str]] = None
-
-    position: Optional[Position] = None
-    account: Optional[Account] = None
-
-    news_override: Optional[bool] = False
-    last_trade_was_loss: Optional[bool] = False
-    unrecovered_loss: Optional[float] = 0.0
-
-    strong_crossover: Optional[bool] = False  # legacy, unused now
-
-    regime: Optional[Regime] = None
-    spread_pips: Optional[float] = None
-    spread_to_sl: Optional[float] = None
-    require_sr_tp: Optional[bool] = None
-
-    # extra contexts (EA sends these too)
-    volatility_context: Optional[Dict[str, Any]] = None
-    fib_summary: Optional[Dict[str, Any]] = None
-    ema_context: Optional[Dict[str, Any]] = None
-
-class TradeWrapper(BaseModel):
-    data: TradeData
-
-# ========= Outgoing schema =========
-AllowedAction = Literal["buy", "sell", "hold", "close"]
-
-class EMAContext(BaseModel):
-    period: Optional[int] = None
-    price_vs_ema: Optional[Literal["above","below","near","unknown"]] = "unknown"
-    aligns_all_tfs: Optional[bool] = False
-    slopes: Optional[Dict[str, str]] = None
-
-class StructureSummary(BaseModel):
-    sr_levels: List[float] = []
-    last_reversal: Optional[str] = "none"
-
-class FibSummary(BaseModel):
-    high: float = 0.0
-    low: float = 0.0
-    active_levels: List[str] = []
-
-class VolatilityContext(BaseModel):
-    atr: float = 0.0
-    bb_state: Optional[Literal["squeeze","expansion","neutral","compressed","expanded"]] = "neutral"
-
-class VolumeContext(BaseModel):
-    mfi: float = 0.0
-    state: Optional[Literal["low","normal","high","unknown"]] = "unknown"
-
-class ModelSelfAudit(BaseModel):
-    data_used: List[str] = []
-    data_ignored: List[str] = []
-    confidence_rationale: str = ""
+    close_partial_volume: Optional[float] = None
 
 class DecisionOut(BaseModel):
-    action: AllowedAction
+    action: str = Field(..., regex=r"^(open_long|open_short|modify|close|hold)$")
     reason: str
-    confidence: conint(ge=0, le=10) = 0
-    lot: Optional[confloat(ge=0)] = None
-    new_sl: Optional[float] = None
-    new_tp: Optional[float] = None
-    categories: List[str] = []
+    orders: OrdersOut = OrdersOut()
 
-    missing_categories: List[str] = []
-    needed_to_enter: List[str] = []
-    disqualifiers: List[str] = []
+# ---------------- Helpers --------------------
+def getf(d: Dict[str, Any], k: str, default: float = 0.0) -> float:
+    try: return float(d.get(k, default))
+    except Exception: return default
 
-    session_block: bool = False
-    god_mode_used: bool = False
-    force_close: bool = False
+def geti(d: Dict[str, Any], k: str, default: int = 0) -> int:
+    try: return int(d.get(k, default))
+    except Exception: return default
 
-    ema_context: EMAContext = EMAContext()
-    structure_summary: StructureSummary = StructureSummary()
-    fib_summary: FibSummary = FibSummary()
-    volatility_context: VolatilityContext = VolatilityContext()
-    volume_context: VolumeContext = VolumeContext()
+def getb(d: Dict[str, Any], k: str, default: bool = False) -> bool:
+    v = d.get(k, default)
+    if isinstance(v, bool): return v
+    if isinstance(v, (int, float)): return v != 0
+    if isinstance(v, str): return v.lower() in ("true","1","yes","y")
+    return bool(v)
 
-    risk_notes: str = ""
-    policy: Optional[Literal["none","session_exit","friday_exit","news_conflict"]] = "none"
-    recovery_mode: bool = False
+def position_from(payload: Dict[str, Any]) -> Dict[str, Any]:
+    p = payload.get("position") or {}
+    return {
+        "has": getb(p, "has", False),
+        "dir": p.get("dir"),
+        "volume": getf(p, "volume", 0.0),
+        "entry": getf(p, "entry", 0.0),
+        "sl": getf(p, "sl", 0.0),
+        "tp": getf(p, "tp", 0.0),
+        "r_now": getf(p, "r_now", 0.0),
+        "unrealized": getf(p, "unrealized", 0.0),
+        "age_minutes": geti(p, "age_minutes", 0),
+        "partial_done": getb(p, "partial_done", False),
+    }
 
-    model_self_audit: ModelSelfAudit = ModelSelfAudit()
+def sentiment_score(payload: Dict[str, Any]) -> float:
+    s = payload.get("sentiment") or {}
+    bull = float(s.get("bull", GLOBAL_SENTIMENT["bull"]))
+    bear = float(s.get("bear", GLOBAL_SENTIMENT["bear"]))
+    tot  = bull + bear
+    if tot <= 0: return 0.5
+    return max(0.0, min(1.0, bull / tot))
 
-# ========= helpers =========
-ALLOWED_ACTIONS = {"buy", "sell", "hold", "close"}
-ALLOWED_POLICIES = {"none", "session_exit", "friday_exit", "news_conflict"}
+def waves_bias_conf(payload: Dict[str, Any]) -> tuple[str, float]:
+    w = payload.get("waves")
+    if not isinstance(w, dict): return "neutral", 0.0
+    bias = str(w.get("bias", "neutral")).lower()
+    conf = float(w.get("confidence", 0.0))
+    return bias, max(0.0, min(1.0, conf))
 
-def _as_bool(x):
-    if isinstance(x, bool): return x
-    if isinstance(x, (int, float)): return x != 0
-    if isinstance(x, str): return x.strip().lower() in {"1","true","t","yes","y"}
-    return False
+def tech_readiness(payload: Dict[str, Any]) -> Dict[str, bool]:
+    # booleans emitted by EA
+    return {
+        "pull_long":  getb(payload, "pullback_long_ready"),
+        "brk_long":   getb(payload, "breakout_long_ready"),
+        "orb_long":   getb(payload, "orb_long_ready"),
+        "avwap_long": getb(payload, "avwap_long_ready"),
+        "pull_short": getb(payload, "pullback_short_ready"),
+        "brk_short":  getb(payload, "breakout_short_ready"),
+        "orb_short":  getb(payload, "orb_short_ready"),
+    }
 
-def _as_list_str(x):
-    if x is None: return []
-    if isinstance(x, list): return [str(i) for i in x]
-    return [str(x)]
+def combine_scores(payload: Dict[str, Any]) -> Dict[str, float]:
+    senti = sentiment_score(payload)           # 0..1
+    wave_b, wave_c = waves_bias_conf(payload)  # "bullish"/"bearish"/"neutral", 0..1
+    tech = tech_readiness(payload)
 
-def _coerce_dict(x, default=None):
-    if isinstance(x, dict): return x
-    if isinstance(x, str):
-        s = x.strip()
-        if not s: return default if default is not None else {}
-        try:
-            j = json.loads(s)
-            return j if isinstance(j, dict) else (default if default is not None else {})
-        except Exception:
-            return default if default is not None else {}
-    if x is None: return default if default is not None else {}
-    return default if default is not None else {}
+    # technical subscores
+    tl = sum(1 for k in ("pull_long","brk_long","orb_long","avwap_long") if tech[k]) / 4.0
+    ts = sum(1 for k in ("pull_short","brk_short","orb_short")           if tech[k]) / 3.0
 
-def _coerce_policy(p):
-    p = (p or "none")
-    if isinstance(p, str): p = p.strip().lower()
-    else: p = "none"
-    return p if p in ALLOWED_POLICIES else "none"
+    # wave directional confidence
+    wave_long  = wave_c if wave_b == "bullish" else (0.0 if wave_b == "bearish" else wave_c*0.25)
+    wave_short = wave_c if wave_b == "bearish" else (0.0 if wave_b == "bullish" else wave_c*0.25)
 
-def extract_json_object(s: str):
-    if not isinstance(s, str): return None
-    cleaned = re.sub(r"```(?:json|JSON)?", "", s).strip()
-    start = cleaned.find("{"); end = cleaned.rfind("}")
-    if start == -1 or end == -1 or end <= start: return None
-    chunk = cleaned[start:end+1]
-    try:
-        return json.loads(chunk)
-    except Exception:
-        try:
-            no_trailing_commas = re.sub(r",\s*([}\]])", r"\1", chunk)
-            return json.loads(no_trailing_commas)
-        except Exception:
-            return None
+    # sentiment → centered scores
+    senti_long  = max(0.0, (senti - 0.5) * 2.0)   # 0..1
+    senti_short = max(0.0, (0.5 - senti) * 2.0)
 
-def uk_time_now():
-    utc_now = datetime.utcnow().replace(tzinfo=pytz.utc)
-    return utc_now.astimezone(pytz.timezone('Europe/London'))
+    long_score  = SENTI_WEIGHT*senti_long  + WAVE_WEIGHT*wave_long  + TECH_WEIGHT*tl
+    short_score = SENTI_WEIGHT*senti_short + WAVE_WEIGHT*wave_short + TECH_WEIGHT*ts
 
-def is_between_uk_time(start_h, end_h):
-    now = uk_time_now().time()
-    if start_h < end_h:
-        return time(start_h, 0) <= now < time(end_h, 0)
+    return {"long": max(0.0, min(1.0, long_score)),
+            "short": max(0.0, min(1.0, short_score))}
+
+def entry_bias_ok(payload: Dict[str, Any], side: str) -> bool:
+    # respect EA H1 bias (when it’s active on EA side)
+    b = str(payload.get("bias_dir", "neutral")).lower()
+    if side == "long"  and b not in ("long","neutral"):  return False
+    if side == "short" and b not in ("short","neutral"): return False
+    return True
+
+def want_open(side: str, payload: Dict[str, Any], scores: Dict[str, float]) -> bool:
+    regime = str(payload.get("regime", "indecision")).lower()
+    score  = scores[side]
+
+    # shorts stricter for XAU unless ADX strong
+    if side == "short":
+        adx = getf(payload, "adx", 0.0)
+        if adx < MIN_ADX_SHORT:
+            return False
+
+    if regime in ("trend","breakout"):
+        return score >= OPEN_TREND_OR_BREAKOUT and entry_bias_ok(payload, side)
+    if regime == "range":
+        return score >= OPEN_RANGE and entry_bias_ok(payload, side)
+    return score >= OPEN_INDECISION and entry_bias_ok(payload, side)
+
+def proposed_orders(side: str, payload: Dict[str, Any]) -> OrdersOut:
+    if side == "long":
+        sl = getf(payload, "long_proposed_sl", 0.0)
+        tp = getf(payload, "long_proposed_tp", 0.0)
     else:
-        return now >= time(start_h, 0) or now < time(end_h, 0)
-
-def is_friday_5pm_or_later():
-    now = uk_time_now()
-    return now.weekday() == 4 and now.time() >= time(17, 0)
-
-def is_uk_at_or_after(hour_24):
-    return uk_time_now().time() >= time(hour_24, 0)
-
-def extract_categories(reason):
-    m = re.search(r"Confluences?:\s*([^.]+)", reason or "", re.IGNORECASE)
-    if not m: return set()
-    cats = m.group(1)
-    found = set()
-    for cat in ["Trend", "Momentum", "Volatility", "Volume", "Structure", "ADX"]:
-        if re.search(r"\b{}\b".format(cat), cats, re.IGNORECASE):
-            found.add(cat.lower())
-    return found
-
-# EMA + helpers
-def ema_trend(ind: Indicators):
-    if not ind or not ind.ema_array or len(ind.ema_array) < 2: return 0
-    prev_ema = ind.ema_array[-2]; curr_ema = ind.ema_array[-1]
-    if curr_ema > prev_ema: return 1
-    if curr_ema < prev_ema: return -1
-    return 0
-
-def ema_confirms(ind: Indicators, action: str):
-    if not ind or not ind.ema_array or not ind.price_array: return False
-    price = ind.price_array[-1]; ema_last = ind.ema_array[-1]
-    if action == "buy":  return (ema_last is not None and price is not None and price > ema_last and ema_trend(ind) == 1)
-    if action == "sell": return (ema_last is not None and price is not None and price < ema_last and ema_trend(ind) == -1)
-    return False
-
-def infer_tick_tol(ind: Indicators) -> float:
-    price = None
-    if ind and ind.price_array:
-        for v in reversed(ind.price_array):
-            if v: price = v; break
-    if price is None: return 1e-4
-    s = f"{price:.10f}".rstrip("0")
-    decimals = len(s.split(".")[1]) if "." in s else 2
-    return 10 ** (-(decimals - 1))
-
-def macd_hist(ind: Indicators) -> Optional[float]:
-    if not ind or not ind.macd or ind.macd.main is None or ind.macd.signal is None: return None
-    return ind.macd.main - ind.macd.signal
-
-def rsi_latest(ind: Indicators) -> Optional[float]:
-    if not ind or not ind.rsi_array: return None
-    return ind.rsi_array[-1] if len(ind.rsi_array)>0 else None
-
-def rsi_prev(ind: Indicators) -> Optional[float]:
-    if not ind or not ind.rsi_array or len(ind.rsi_array) < 2: return None
-    return ind.rsi_array[-2]
-
-def bb_width(ind: Indicators) -> Optional[float]:
-    if not ind or ind.bb_upper is None or ind.bb_lower is None or ind.bb_middle is None: return None
-    mid = ind.bb_middle if ind.bb_middle != 0 else 1.0
-    return abs(ind.bb_upper - ind.bb_lower) / abs(mid)
-
-def classify_bb_state(ind: Indicators) -> str:
-    w = bb_width(ind)
-    if w is None: return "neutral"
-    if w < 0.002: return "squeeze"
-    if w > 0.005: return "expansion"
-    return "neutral"
-
-def momentum_exhausted_buy(ind_main: Indicators, ind_tf2: Indicators) -> bool:
-    stoch_over = (ind_main.stoch_k or 0) >= 75
-    rsi_now, rsi_was = rsi_latest(ind_main), rsi_prev(ind_main)
-    rsi_roll = (rsi_now is not None and rsi_was is not None and rsi_was >= 55 and rsi_now < rsi_was)
-    hist_main = macd_hist(ind_main); hist_tf2 = macd_hist(ind_tf2)
-    macd_fading = (hist_main is not None and hist_tf2 is not None and hist_main <= hist_tf2)
-    return stoch_over or rsi_roll or macd_fading
-
-def momentum_exhausted_sell(ind_main: Indicators, ind_tf2: Indicators) -> bool:
-    stoch_over = (ind_main.stoch_k or 100) <= 25
-    rsi_now, rsi_was = rsi_latest(ind_main), rsi_prev(ind_main)
-    rsi_roll = (rsi_now is not None and rsi_was is not None and rsi_was <= 45 and rsi_now > rsi_was)
-    hist_main = macd_hist(ind_main); hist_tf2 = macd_hist(ind_tf2)
-    macd_fading = (hist_main is not None and hist_tf2 is not None and hist_main >= hist_tf2)
-    return stoch_over or rsi_roll or macd_fading
-
-def adx_ok_and_rising(action: str, ind_main: Indicators, ind_tf2: Indicators) -> bool:
-    a_main = ind_main.adx or 0.0
-    a_tf2  = ind_tf2.adx if (ind_tf2 and ind_tf2.adx is not None) else None
-    if a_main < 25.0: return False
-    if a_tf2 is not None and a_main <= a_tf2: return False
-    return True
-
-def volume_confirm_buy(ind_main: Indicators, ind_tf2: Indicators) -> bool:
-    m_main = ind_main.mfi
-    m_tf2  = ind_tf2.mfi if ind_tf2 else None
-    if m_main is None or m_main < 60.0: return False
-    if m_tf2 is not None and m_main <= m_tf2: return False
-    return True
-
-def volume_confirm_sell(ind_main: Indicators, ind_tf2: Indicators) -> bool:
-    m_main = ind_main.mfi
-    m_tf2  = ind_tf2.mfi if ind_tf2 else None
-    if m_main is None or m_main > 40.0: return False
-    if m_tf2 is not None and m_main >= m_tf2: return False
-    return True
-
-def bb_expanding(ind_main: Indicators, ind_tf2: Indicators) -> bool:
-    w_main = bb_width(ind_main); w_tf2 = bb_width(ind_tf2)
-    if w_main is None: return False
-    if w_tf2 is None: return classify_bb_state(ind_main) == "expansion"
-    return w_main > w_tf2
-
-# ========= OpenAI call (single shot) =========
-def _gpt_once(prompt: str) -> str:
-    chat = openai_client.chat.completions.create(
-        model=MODEL_ID,
-        messages=[
-            {"role": "system", "content": "You are an elite, disciplined, risk-aware SCALPER assistant. Reply ONLY in strict JSON. Include 'new_sl' and 'new_tp' for buy/sell. Never include analysis outside the JSON fields requested. For object fields, return JSON objects (e.g., {}) not strings."},
-            {"role": "user", "content": prompt}
-        ],
-        max_tokens=2500,
-        temperature=0.15,
-        response_format={"type": "json_object"}
-    )
-    return chat.choices[0].message.content or ""
-
-def call_gpt_messages(prompt: str):
-    try:
-        return _gpt_once(prompt)
-    except Exception as e:
-        logging.error(f"GPT error: {e}")
-        return ""
-
-# ========= Validation / sanitize =========
-def sanitize_and_validate(out_dict: Dict[str, Any], fallback_reason: str, in_recovery_mode: bool) -> DecisionOut:
-    action = str(out_dict.get("action", "hold")).strip().lower()
-    if action not in ALLOWED_ACTIONS:
-        action = "hold"
-        out_dict["reason"] = (out_dict.get("reason") or "") + " | Action invalid; coerced to HOLD."
-    out_dict["action"] = action
-
-    # defaults
-    out_dict.setdefault("reason", fallback_reason)
-    out_dict.setdefault("confidence", 0)
-    out_dict.setdefault("categories", [])
-    out_dict.setdefault("missing_categories", [])
-    out_dict.setdefault("needed_to_enter", [])
-    out_dict.setdefault("disqualifiers", [])
-    out_dict.setdefault("session_block", False)
-    out_dict.setdefault("god_mode_used", False)
-    out_dict.setdefault("force_close", False)
-    out_dict.setdefault("ema_context", {})
-    out_dict.setdefault("structure_summary", {})
-    out_dict.setdefault("fib_summary", {})
-    out_dict.setdefault("volatility_context", {})
-    out_dict.setdefault("volume_context", {})
-    out_dict.setdefault("risk_notes", "")
-    out_dict.setdefault("policy", "none")
-    out_dict.setdefault("model_self_audit", {})
-    out_dict["recovery_mode"] = in_recovery_mode
-
-    try:
-        out_dict["confidence"] = max(0, min(10, int(out_dict.get("confidence", 0) or 0)))
-    except Exception:
-        out_dict["confidence"] = 0
-
-    for k in ("categories","missing_categories","needed_to_enter","disqualifiers"):
-        out_dict[k] = _as_list_str(out_dict.get(k, []))
-    for k in ("session_block","god_mode_used","force_close"):
-        out_dict[k] = _as_bool(out_dict.get(k, False))
-
-    def _cd(key): return _coerce_dict(out_dict.get(key), default={})
-    for k in ("ema_context","structure_summary","fib_summary","volatility_context","volume_context","model_self_audit"):
-        out_dict[k] = _cd(k)
-
-    out_dict["policy"] = _coerce_policy(out_dict.get("policy"))
-
-    if isinstance(out_dict.get("reason"), str) and len(out_dict["reason"]) > REASON_MAXLEN:
-        out_dict["reason"] = out_dict["reason"][:REASON_MAXLEN] + "..."
-
-    return DecisionOut(**out_dict)
-
-# ========= Core endpoint =========
-@app.post("/gpt/manage")
-async def gpt_manage(wrapper: TradeWrapper):
-    trade = wrapper.data
-    ind_main = trade.indicators or Indicators()
-    ind_tf2  = trade.tf2_indicators or Indicators()
-    ind_tf3  = trade.tf3_indicators or Indicators()
-    pos = trade.position
-
-    # inject price arrays if missing (from candles)
-    def inject_from_candles(ind: Indicators, candles: List[Candle]):
-        if not ind: return
-        if (not ind.price_array) and candles:
-            closes = [c.close for c in candles if c and c.close is not None]
-            if closes:
-                ind.price_array = closes[-2:] if len(closes) >= 2 else closes
-
-    candles_main = (trade.timeframes.main or [])[-5:] if (trade.timeframes and trade.timeframes.main) else []
-    candles_tf2  = (trade.timeframes.tf2  or [])[-5:] if (trade.timeframes and trade.timeframes.tf2)  else []
-    candles_tf3  = (trade.timeframes.tf3  or [])[-5:] if (trade.timeframes and trade.timeframes.tf3)  else []
-    inject_from_candles(ind_main, candles_main)
-    inject_from_candles(ind_tf2,  candles_tf2)
-    inject_from_candles(ind_tf3,  candles_tf3)
-
-    cross_signal = trade.cross_signal or "none"
-    cross_meaning = trade.cross_meaning or "none"
-
-    ema_period = ind_main.ema_period or 100
-    tf_label_main = (trade.tf_names or {}).get("main", "main")
-    tf_label_tf2  = (trade.tf_names or {}).get("tf2",  "tf2")
-    tf_label_tf3  = (trade.tf_names or {}).get("tf3",  "tf3")
-
-    # slopes
-    def _ema_slope(ind: Indicators):
-        if not ind or not ind.ema_array or len(ind.ema_array) < 2: return 0.0
-        return (ind.ema_array[-1] or 0.0) - (ind.ema_array[-2] or 0.0)
-
-    main_slope = _ema_slope(ind_main)
-    tf2_slope  = _ema_slope(ind_tf2)
-    tf3_slope  = _ema_slope(ind_tf3)
-
-    def _slope_desc(slope, base):
-        thr = (abs(base) * 1e-6) if base else 1e-6
-        if slope > thr: return f"sloping up ({slope:.6f})"
-        if slope < -thr: return f"sloping down ({slope:.6f})"
-        return f"flat ({slope:.6f})"
-
-    main_slope_txt = _slope_desc(main_slope, (ind_main.ema_array[-1] if ind_main.ema_array else 0.0))
-    tf2_slope_txt  = _slope_desc(tf2_slope,  (ind_tf2.ema_array[-1] if ind_tf2.ema_array else 0.0))
-    tf3_slope_txt  = _slope_desc(tf3_slope,  (ind_tf3.ema_array[-1] if ind_tf3.ema_array else 0.0))
-
-    def atr_norm_slope(slope: float, ind: Indicators) -> float:
-        atr = ind.atr if ind and ind.atr else None
-        ref = atr if (atr and atr > 0) else (ind.price_array[-1] if ind and ind.price_array else 1.0)
-        ref = abs(ref) if ref else 1.0
-        return slope / ref
-
-    norm_main = atr_norm_slope(main_slope, ind_main)
-    regime = trade.regime or Regime()
-    spread_to_sl = trade.spread_to_sl if trade.spread_to_sl is not None else 0.0
-    require_sr_tp = bool(trade.require_sr_tp)
-
-    in_recovery_mode = bool(trade.last_trade_was_loss or (trade.unrecovered_loss or 0.0) > 0.0)
-
-    logging.info(f"🔻 RAW PAYLOAD:\n{wrapper.json()}\n---")
-
-    # news override
-    if trade.news_override:
-        return JSONResponse(content={
-            "action": "hold",
-            "reason": "News conflict — override active",
-            "confidence": 0,
-            "categories": [],
-            "missing_categories": ["trend","momentum","volatility","volume","structure","adx"],
-            "needed_to_enter": ["Wait for news window to end."],
-            "disqualifiers": ["News override"],
-            "session_block": False,
-            "god_mode_used": False,
-            "ema_context": {},
-            "structure_summary": {},
-            "fib_summary": {},
-            "volatility_context": {},
-            "volume_context": {},
-            "risk_notes": "",
-            "policy": "news_conflict",
-            "model_self_audit": {"data_used": [], "data_ignored": [], "confidence_rationale": ""},
-            "recovery_mode": in_recovery_mode,
-            "force_close": False
-        })
-
-    # 19:00 UK profit lock policy
-    if trade.update_type == "session_check_19" or is_uk_at_or_after(19):
-        if pos and (pos.pnl or 0.0) > 0.0:
-            return JSONResponse(content={
-                "action": "close",
-                "reason": "Session policy: 19:00 UK — locking in profit to avoid spread widening. Confluences: Trend (policy), Momentum (n/a), Volatility (n/a), Volume (n/a), Structure (n/a), ADX (n/a).",
-                "confidence": 10,
-                "categories": ["trend"],
-                "recovery_mode": in_recovery_mode,
-                "force_close": True,
-                "session_block": True,
-                "god_mode_used": False,
-                "missing_categories": [],
-                "needed_to_enter": [],
-                "disqualifiers": ["Session policy exit"],
-                "policy": "session_exit",
-                "ema_context": {},
-                "structure_summary": {},
-                "fib_summary": {},
-                "volatility_context": {},
-                "volume_context": {},
-                "risk_notes": "",
-                "model_self_audit": {"data_used": [], "data_ignored": [], "confidence_rationale": ""}
-            })
-
-    recovery_note = ""
-    if in_recovery_mode:
-        recovery_note = (
-            "\n---\n"
-            "RECOVERY MODE: Require ≥5/6 categories and confidence ≥8. "
-            "List the exact categories used.\n---\n"
-        )
-
-    prompt = f"""{recovery_note}
-You are a disciplined prop-firm scalping assistant. Reply in STRICT JSON only.
-
-EXTRA CONTEXT FROM EA:
-- regime: {regime.dict()}   # label in ["trend","range","breakout"]
-- spread_to_sl: {spread_to_sl:.3f}
-- require_sr_tp: {require_sr_tp}  # if True, TP must reference SR/Fib, not just 2R
-
-USE ALL CAPABILITIES:
-- Quote numeric values you rely on (MACD, RSI, MFI, ADX, BB width %, ATR multiples, EMA slopes).
-- Evidence audit: list data you used vs. ignored (with reason).
-- Counterfactuals: minimal changes that would flip HOLD→ENTRY (e.g., "ADX>22 and price retests EMA as support").
-- Session rules: honor 19:00–07:00 UK and Friday 17:00+ (session_block=true).
-- Risk: state SL method (swing/ATR) and TP method (≥2R OR SR/Fib per require_sr_tp), with numbers.
-
-CATEGORIES (max 1 per cat):
-1) TREND: EMA {ema_period} on MAIN TF ONLY (mandatory for entries)
-2) MOMENTUM: MACD OR RSI OR Stochastic
-3) VOLATILITY: Bollinger Bands OR ATR
-4) VOLUME: MFI OR volume spike
-5) STRUCTURE: S/R OR Fibonacci OR reversal candle
-6) ADX: ADX > 20 and direction
-
-HARD RULES:
-- Confluences line is mandatory: "Confluences: Trend (...), Momentum (...), Volatility (...), Volume (...), Structure (...), ADX (...)."
-- ABSOLUTE TREND: BUY only if EMA {ema_period} slopes up AND price>EMA; SELL only if slopes down AND price<EMA.
-- GOD-MODE: Allowed only if EMA is NOT strongly against. If used, set god_mode_used=true and justify.
-- Entries need at least {"5" if in_recovery_mode else "4"} categories and confidence ≥ {"8" if in_recovery_mode else "6"}.
-- No new trades 19:00–07:00 UK and after 17:00 UK Friday (set session_block=true).
-
-SL/TP:
-- SL beyond last swing or ≥1xATR (state which, with numbers).
-- TP ≥2xSL or next S/R/Fib (state which, with numbers). If require_sr_tp=true, TP must be SR/Fib-based.
-
-SLOPES ({tf_label_main}/{tf_label_tf2}/{tf_label_tf3}):
-- {tf_label_main} EMA {ema_period}: {main_slope_txt}
-- {tf_label_tf2}  EMA {ema_period}: {tf2_slope_txt}
-- {tf_label_tf3}  EMA {ema_period}: {tf3_slope_txt}
-
-CONTEXT:
-- Indicators (main): {ind_main.dict()}
-- Indicators (tf2): {ind_tf2.dict()}
-- Indicators (tf3): {ind_tf3.dict()}
-- Recent Candles ({tf_label_main}): {[c.dict() for c in candles_main]}
-- Cross Signal: {cross_signal} | Meaning: {cross_meaning}
-- Position: {pos.dict() if pos else "None"}
-
-Return JSON EXACTLY like:
-{{
-  "action": "buy|sell|hold|close",
-  "reason": "Confluences: Trend (...), Momentum (...), Volatility (...), Volume (...), Structure (...), ADX (...). Then full explanation.",
-  "confidence": 0-10,
-  "lot": 1,
-  "new_sl": 0.0,
-  "new_tp": 0.0,
-  "categories": ["trend","momentum","volatility","volume","structure","adx"],
-
-  "missing_categories": ["volume","structure"],
-  "needed_to_enter": ["ADX>20","price above EMA"],
-  "disqualifiers": ["EMA {ema_period} flat","Session block"],
-
-  "session_block": false,
-  "god_mode_used": false,
-
-  "ema_context": {{
-    "period": {ema_period},
-    "price_vs_ema": "above|below|near",
-    "aligns_all_tfs": true|false,
-    "slopes": {{"{tf_label_main}": "{main_slope_txt}", "{tf_label_tf2}": "{tf2_slope_txt}", "{tf_label_tf3}": "{tf3_slope_txt}"}}
-  }},
-  "structure_summary": {{"sr_levels": [..], "last_reversal": "hammer|engulfing|none"}},
-  "fib_summary": {{"high": 0.0, "low": 0.0, "active_levels": ["38.2","61.8"]}},
-  "volatility_context": {{"atr": 0.0, "bb_state": "squeeze|expansion|neutral"}},
-  "volume_context": {{"mfi": 0.0, "state": "low|normal|high"}},
-
-  "risk_notes": "1R=..., SL at swing low + ATR buffer...",
-  "policy": "none|session_exit|friday_exit|news_conflict",
-
-  "model_self_audit": {{
-    "data_used": ["ema_array[-2:]", "price_array[-1]", "macd.main", "mfi", "adx"],
-    "data_ignored": ["ichimoku (not part of confluence categories)"],
-    "confidence_rationale": "why confidence=X given the evidence"
-  }}
-}}
-"""
-    raw = call_gpt_messages(prompt)
-    if not raw or not raw.strip():
-        return JSONResponse(content={
-            "action":"hold","reason":"Empty model response","confidence":0,
-            "categories":[], "recovery_mode": in_recovery_mode,
-            "session_block": False, "force_close": False,
-            "ema_context":{}, "structure_summary":{}, "fib_summary":{},
-            "volatility_context":{}, "volume_context":{}, "risk_notes":"", "policy":"none",
-            "model_self_audit":{"data_used":[],"data_ignored":[],"confidence_rationale":""}
-        })
-
-    logging.info(f"📩 GPT raw (truncated): {raw[:800]}")
-    decision = extract_json_object(raw) or {"raw": raw}
-    action = decision if isinstance(decision, dict) else {"action": "hold", "reason": "Could not decode.", "confidence": 0}
-
-    # collect categories from list + 'Confluences:' line
-    claimed = set()
-    if isinstance(action.get("categories"), list):
-        claimed |= {str(x).lower() for x in action["categories"]}
-    claimed |= extract_categories(action.get("reason", ""))
-    action["categories"] = sorted(list(claimed))
-
-    conf = int(action.get("confidence", 0) or 0)
-    min_cats = 5 if in_recovery_mode else 4
-    min_conf = 8 if in_recovery_mode else 6
-
-    # entry requirements
-    if action.get("action") in {"buy", "sell"}:
-        if "confluences:" not in (action.get("reason", "").lower()):
-            action["action"] = "hold"
-            action["reason"] = (action.get("reason","") + " | Missing mandatory Confluences line.").strip()
-        if len(claimed) < min_cats:
-            action["action"] = "hold"
-            action["reason"] = (action.get("reason","") + f" | Confluence requirement not met ({len(claimed)}/{min_cats}).").strip()
-
-    if action.get("action") in {"buy", "sell"}:
-        if "new_sl" not in action or "new_tp" not in action:
-            action["action"] = "hold"
-            action["reason"] += " | Missing new_sl/new_tp for entry."
-        if conf < min_conf:
-            action["action"] = "hold"
-            action["reason"] += f" | Confidence too low ({conf}<{min_conf})."
-        if require_sr_tp and "structure" not in claimed:
-            action["action"] = "hold"
-            action["reason"] += " | High spread/SL: TP must be SR/Fib-based (Structure)."
-
-    # session guards (no new trades outside UK hours; close profits on Friday 17+ handled below)
-    if action.get("action") in {"buy", "sell"} and is_between_uk_time(19, 7):
-        action["action"] = "hold"
-        action["reason"] += " | No new trades between 19:00 and 07:00 UK."
-        action["session_block"] = True
-
-    if is_friday_5pm_or_later():
-        if pos and (pos.pnl or 0.0) > 0 and action.get("action") not in {"close", "hold"}:
-            action["action"] = "close"
-            action["reason"] += " | Closing profitable trade before weekend."
-            action["force_close"] = True
-            action["policy"] = "friday_exit"
-        elif action.get("action") in {"buy", "sell"}:
-            action["action"] = "hold"
-            action["reason"] += " | No new trades after 17:00 UK Friday."
-            action["session_block"] = True
-
-    # EMA hard guard / god-mode
-    def ema_trend_local(ind: Indicators):
-        if not ind or not ind.ema_array or len(ind.ema_array) < 2: return 0
-        prev_ema = ind.ema_array[-2]; curr_ema = ind.ema_array[-1]
-        if curr_ema > prev_ema: return 1
-        if curr_ema < prev_ema: return -1
-        return 0
-
-    def ema_confirms_local(ind: Indicators, action_dir: str):
-        if not ind or not ind.ema_array or not ind.price_array: return False
-        price = ind.price_array[-1]; ema_last = ind.ema_array[-1]
-        if action_dir == "buy":  return (ema_last is not None and price is not None and price > ema_last and ema_trend_local(ind) == 1)
-        if action_dir == "sell": return (ema_last is not None and price is not None and price < ema_last and ema_trend_local(ind) == -1)
-        return False
-
-    main_trend = ema_trend_local(ind_main)
-    strong_thresh = 0.02
-    if action.get("action") in {"buy", "sell"}:
-        trend_block = False
-        if not ema_confirms_local(ind_main, action["action"]):
-            if action["action"] == "buy" and (main_trend == -1 and atr_norm_slope(main_slope, ind_main) < -strong_thresh):
-                trend_block = True
-            if action["action"] == "sell" and (main_trend == 1 and atr_norm_slope(main_slope, ind_main) > strong_thresh):
-                trend_block = True
-        if trend_block:
-            action["action"] = "hold"
-            action["reason"] += " | EMA trend strongly opposes (hard block)."
-            action["god_mode_used"] = False
+        sl = getf(payload, "short_proposed_sl", 0.0)
+        tp = getf(payload, "short_proposed_tp", 0.0)
+    return OrdersOut(sl=sl if sl>0 else None, tp=tp if tp>0 else None)
+
+def hard_guards(payload: Dict[str, Any]) -> Optional[DecisionOut]:
+    # symbol allowlist
+    sym = (payload.get("symbol") or "").upper()
+    if SYMBOL_ALLOW and all(s.upper() != sym for s in SYMBOL_ALLOW):
+        return DecisionOut(action="hold", reason=f"Symbol not allowed: {sym}", orders=OrdersOut())
+
+    # spread and DD lock from EA
+    if not getb(payload, "max_spread_pips_ok", True):
+        return DecisionOut(action="hold", reason="Spread filter (EA)", orders=OrdersOut())
+
+    if getb(payload, "daily_dd_locked", False):
+        pos = position_from(payload)
+        if pos["has"]:
+            return DecisionOut(action="close", reason="Daily DD lock (EA) — closing", orders=OrdersOut())
+        return DecisionOut(action="hold", reason="Daily DD lock (EA) — flat", orders=OrdersOut())
+
+    return None
+
+def manage_open_position(payload: Dict[str, Any]) -> DecisionOut:
+    """Light-touch management. EA already handles BE/partial/trailing."""
+    pos = position_from(payload)
+    # hard stop on adverse R multiple
+    if pos["r_now"] <= -HARD_STOP_R_MULT:
+        return DecisionOut(action="close", reason=f"Hard stop: r_now={pos['r_now']:.2f}", orders=OrdersOut())
+
+    # optional: tighten TP near AB=CD completion once > trail start R
+    waves = payload.get("waves") or {}
+    completion = getf(waves, "completion_price", 0.0)
+    if pos["dir"] == "long" and pos["r_now"] >= TRAIL_START_R and completion > 0:
+        tp_now = pos["tp"]
+        if tp_now and tp_now > completion:
+            return DecisionOut(action="modify", reason="Tighten TP to AB=CD completion", orders=OrdersOut(tp=completion))
+    if pos["dir"] == "short" and pos["r_now"] >= TRAIL_START_R and completion > 0:
+        tp_now = pos["tp"]
+        if tp_now and tp_now < completion:
+            return DecisionOut(action="modify", reason="Tighten TP to AB=CD completion", orders=OrdersOut(tp=completion))
+
+    return DecisionOut(action="hold", reason="EA managing (BE/partial/trail)", orders=OrdersOut())
+
+# ---------------- Endpoint -------------------
+@app.post("/gpt/manage", response_model=DecisionOut)
+async def gpt_manage(req: Request):
+    payload: Dict[str, Any] = await req.json()
+
+    # hard guards
+    hg = hard_guards(payload)
+    if hg is not None:
+        return hg
+
+    # if position open, keep decisions minimal
+    pos = position_from(payload)
+    if pos["has"]:
+        return manage_open_position(payload)
+
+    # flat → evaluate entries
+    scores = combine_scores(payload)
+    long_ok  = want_open("long",  payload, scores)
+    short_ok = want_open("short", payload, scores)
+
+    if long_ok or short_ok:
+        if scores["long"] >= scores["short"]:
+            od = proposed_orders("long", payload)
+            return DecisionOut(action="open_long",
+                               reason=f"Open long (score={scores['long']:.2f})",
+                               orders=od)
         else:
-            if not ema_confirms_local(ind_main, action["action"]):
-                action["god_mode_used"] = True
-                action["reason"] += " | God-mode: EMA not strongly against — confluence+confidence allow entry."
-            agrees_tf2 = ema_trend_local(ind_tf2) == (1 if action["action"] == "buy" else -1)
-            agrees_tf3 = ema_trend_local(ind_tf3) == (1 if action["action"] == "buy" else -1)
-            if agrees_tf2 and agrees_tf3:
-                action["confidence"] = int(action.get("confidence", 0)) + 1
-                action["reason"] += " | EMA alignment across main/tf2/tf3. Confidence +1."
+            od = proposed_orders("short", payload)
+            return DecisionOut(action="open_short",
+                               reason=f"Open short (score={scores['short']:.2f})",
+                               orders=od)
 
-    # Low-Volatility Trend Trap
-    if action.get("action") in {"buy", "sell"}:
-        bb_state_main = classify_bb_state(ind_main)
-        is_neutral = (bb_state_main == "neutral")
-        expanding = bb_expanding(ind_main, ind_tf2)
-        adx_rising = adx_ok_and_rising(action["action"], ind_main, ind_tf2)
-        vol_conf = volume_confirm_buy(ind_main, ind_tf2) if action["action"] == "buy" else volume_confirm_sell(ind_main, ind_tf2)
-        mom_exh = momentum_exhausted_buy(ind_main, ind_tf2) if action["action"] == "buy" else momentum_exhausted_sell(ind_main, ind_tf2)
-        if is_neutral and mom_exh and not (adx_rising and expanding and vol_conf):
-            action["reason"] += " | Low-Volatility Trend Trap: BB neutral + momentum exhaustion with no expansion/ADX rise/volume push."
-            action["disqualifiers"] = _as_list_str(action.get("disqualifiers", [])) + ["low_vol_trend_trap"]
-            action["action"] = "hold"
+    return DecisionOut(action="hold", reason="No edge (scores below thresholds / bias/regime mismatch)", orders=OrdersOut())
 
-    # Pre-22:00 profit lock preference (server nudge)
-    if pos and (pos.pnl or 0.0) > 0 and is_between_uk_time(21, 22) and action.get("action") not in {"close", "hold"}:
-        action["action"] = "close"
-        action["reason"] += " | Pre-22:00 UK: prefer locking profit."
-        action["force_close"] = True
-        action["policy"] = "session_exit"
-
-    # Breakeven SL: never move SL backwards (if EA forwards us a modify)
-    if pos and action.get("action") and "new_sl" in action and pos.open_price is not None and pos.sl is not None:
-        tick_tol = infer_tick_tol(ind_main)
-        if abs((pos.sl or 0.0) - (pos.open_price or 0.0)) <= tick_tol:
-            action["new_sl"] = pos.sl
-            action["reason"] += " | SL at breakeven; not moving SL."
-
-    # default contexts for missing keys
-    action.setdefault("ema_context", {
-        "period": ema_period,
-        "price_vs_ema": "unknown",
-        "aligns_all_tfs": False,
-        "slopes": {tf_label_main: main_slope_txt, tf_label_tf2: tf2_slope_txt, tf_label_tf3: tf3_slope_txt}
-    })
-    action.setdefault("structure_summary", {"sr_levels": [], "last_reversal": "none"})
-    action.setdefault("fib_summary", {"high": 0.0, "low": 0.0, "active_levels": []})
-    action.setdefault("volatility_context", {"atr": float(ind_main.atr or 0.0), "bb_state": classify_bb_state(ind_main)})
-    action.setdefault("volume_context", {"mfi": float(ind_main.mfi or 0.0), "state": "unknown"})
-    action.setdefault("risk_notes", "")
-    action.setdefault("policy", "none")
-    action.setdefault("force_close", False)
-    action.setdefault("model_self_audit", {"data_used": [], "data_ignored": [], "confidence_rationale": ""})
-    action["recovery_mode"] = in_recovery_mode
-
-    try:
-        validated = sanitize_and_validate(action, "Validated output", in_recovery_mode)
-    except ValidationError as ve:
-        logging.warning(f"ValidationError (no repair): {ve}")
-        validated = DecisionOut(
-            action="hold",
-            reason="Validation failed.",
-            confidence=0,
-            categories=[],
-            recovery_mode=in_recovery_mode
-        )
-
-    logging.info(f"📝 Decision: {validated.model_dump_json()[:1200]}")
-    return JSONResponse(content=json.loads(validated.model_dump_json()))
+# ---- Simple sentiment setter for testing ----
+@app.get("/sentiment/set")
+async def set_sentiment(bull: float, bear: float):
+    bull = max(0.0, min(1.0, float(bull)))
+    bear = max(0.0, min(1.0, float(bear)))
+    if bull == 0 and bear == 0:
+        bull, bear = 0.5, 0.5
+    GLOBAL_SENTIMENT.update({"bull": bull, "bear": bear, "ts": time.time()})
+    return {"ok": True, "sentiment": GLOBAL_SENTIMENT}
 
 @app.get("/")
 async def root():
-    return {"message": "SmartGPT EA SCALPER — adaptive early-entry compatible, regime+spread aware, tf2/tf3 context, strict confluences, low-vol trend-trap, session/news guards, JSON hard-validate."}
+    return {"ok": True, "msg": "GM GPT Trade Server — regime/bias + tech + AB=CD + sentiment, with prop-safe guards."}
