@@ -1,42 +1,78 @@
-# main.py — GPT webhook for XAUUSD_Pro_GM_ORB_AVWAP_GPT.mq5
-# FastAPI server that ingests EA payload and returns: open_long/open_short/modify/close/hold
-# Decision = tech readiness + AB=CD waves + optional sentiment, with hard risk guards.
+# main.py — GPT decision server for XAUUSD_Pro_GM_ORB_AVWAP_GPT.mq5
+#
+# Inputs:  EA JSON payload (see BuildPayloadJSON in your EA)
+# Output:  {"action": "open_long|open_short|modify|close|hold",
+#           "reason": "...",
+#           "orders": {"sl": float|null, "tp": float|null, "close_partial_volume": float|null}}
+#
+# GPT is the decision maker. Local hard-guards still apply (spread/DD lock/-R kill switch).
+# Sentiment: uses payload.sentiment plus server-side aggregations you can set via endpoints.
 
 from __future__ import annotations
 from typing import Any, Dict, Optional
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
 from fastapi.responses import JSONResponse
-import os, time, math
+from pydantic import BaseModel, Field
+import os, json, time, math
 
-# ---------------- Env / knobs ----------------
+# ------------- OpenAI -------------
+from openai import OpenAI
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+if not OPENAI_API_KEY:
+    raise RuntimeError("OPENAI_API_KEY is not set")
+
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")  # e.g., gpt-4o, gpt-4o-mini, gpt-4.1
+OAI = OpenAI(api_key=OPENAI_API_KEY)
+
+# ------------- Server knobs -------------
 SYMBOL_ALLOW = set(os.getenv("SYMBOL_ALLOW", "XAUUSD,XAUUSD.m,XAUUSD_i").split(","))
+REQ_TIMEOUT_MS = int(os.getenv("REQ_TIMEOUT_MS", "5000"))
 
-# weights (0..1). They are normalized implicitly by thresholds below.
-SENTI_WEIGHT = float(os.getenv("SENTI_WEIGHT", "0.35"))
-WAVE_WEIGHT  = float(os.getenv("WAVE_WEIGHT",  "0.40"))
-TECH_WEIGHT  = float(os.getenv("TECH_WEIGHT",  "0.25"))
+# Prop/guard rails
+HARD_STOP_R_MULT = float(os.getenv("HARD_STOP_R_MULT", "1.30"))   # close if r_now <= -1.30
+MIN_ADX_SHORT    = float(os.getenv("MIN_ADX_SHORT", "24.0"))      # GPT will see ADX, but we hard-veto weak shorts
 
-# thresholds
-OPEN_TREND_OR_BREAKOUT = float(os.getenv("OPEN_TREND_OR_BREAKOUT", "0.55"))
-OPEN_RANGE             = float(os.getenv("OPEN_RANGE",             "0.70"))
-OPEN_INDECISION        = float(os.getenv("OPEN_INDECISION",        "0.75"))
-MIN_ADX_SHORT          = float(os.getenv("MIN_ADX_SHORT",          "24.0"))
-HARD_STOP_R_MULT       = float(os.getenv("HARD_STOP_R_MULT",       "1.30"))  # close if r_now <= -1.3R
-TRAIL_START_R          = float(os.getenv("TRAIL_START_R",          "1.40"))  # mirrors EA
+# ------------- Sentiment store (optional external sources) -------------
+# You can push external signals (news, risk-on/off, DXY/inverse, gold ETF flows) here via API endpoints below.
+SENTIMENT = {
+    "bull": 0.5,       # normalized 0..1 (bullish)
+    "bear": 0.5,       # normalized 0..1 (bearish)
+    "components": {},  # store raw inputs for transparency
+    "ts": time.time(),
+}
 
-# simple in-memory sentiment (optional)
-GLOBAL_SENTIMENT = {"bull": 0.5, "bear": 0.5, "ts": time.time()}
+def combined_sentiment(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Blend EA-provided sentiment and server-side sentiment into one normalized view."""
+    p_sent = payload.get("sentiment") or {}
+    bull_p = float(p_sent.get("bull", 0.5))
+    bear_p = float(p_sent.get("bear", 0.5))
+    tot_p = bull_p + bear_p
+    bull_p = (bull_p / tot_p) if tot_p > 0 else 0.5
 
-# ---------------- API scaffolding -------------
-app = FastAPI(title="GM GPT Trade Server", version="1.0")
+    bull_s = SENTIMENT["bull"]
+    # weighted average: payload gets 60%, server store 40%
+    bull = 0.6 * bull_p + 0.4 * bull_s
+    bull = max(0.0, min(1.0, bull))
+    bear = 1.0 - bull
+    return {
+        "bull": bull,
+        "bear": bear,
+        "details": {
+            "payload_bull": bull_p,
+            "server_bull": bull_s,
+            "components": SENTIMENT.get("components", {}),
+        }
+    }
+
+# ------------- API + schema -------------
+app = FastAPI(title="GM GPT Trade Server", version="2.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_methods=["*"], allow_headers=["*"], allow_credentials=False
 )
 
-# ---------------- Outgoing schema -------------
 class OrdersOut(BaseModel):
     sl: Optional[float] = None
     tp: Optional[float] = None
@@ -47,13 +83,9 @@ class DecisionOut(BaseModel):
     reason: str
     orders: OrdersOut = OrdersOut()
 
-# ---------------- Helpers --------------------
+# ------------- Helpers -------------
 def getf(d: Dict[str, Any], k: str, default: float = 0.0) -> float:
     try: return float(d.get(k, default))
-    except Exception: return default
-
-def geti(d: Dict[str, Any], k: str, default: int = 0) -> int:
-    try: return int(d.get(k, default))
     except Exception: return default
 
 def getb(d: Dict[str, Any], k: str, default: bool = False) -> bool:
@@ -74,99 +106,17 @@ def position_from(payload: Dict[str, Any]) -> Dict[str, Any]:
         "tp": getf(p, "tp", 0.0),
         "r_now": getf(p, "r_now", 0.0),
         "unrealized": getf(p, "unrealized", 0.0),
-        "age_minutes": geti(p, "age_minutes", 0),
+        "age_minutes": int(getf(p, "age_minutes", 0.0)),
         "partial_done": getb(p, "partial_done", False),
     }
 
-def sentiment_score(payload: Dict[str, Any]) -> float:
-    s = payload.get("sentiment") or {}
-    bull = float(s.get("bull", GLOBAL_SENTIMENT["bull"]))
-    bear = float(s.get("bear", GLOBAL_SENTIMENT["bear"]))
-    tot  = bull + bear
-    if tot <= 0: return 0.5
-    return max(0.0, min(1.0, bull / tot))
-
-def waves_bias_conf(payload: Dict[str, Any]) -> tuple[str, float]:
-    w = payload.get("waves")
-    if not isinstance(w, dict): return "neutral", 0.0
-    bias = str(w.get("bias", "neutral")).lower()
-    conf = float(w.get("confidence", 0.0))
-    return bias, max(0.0, min(1.0, conf))
-
-def tech_readiness(payload: Dict[str, Any]) -> Dict[str, bool]:
-    # booleans emitted by EA
-    return {
-        "pull_long":  getb(payload, "pullback_long_ready"),
-        "brk_long":   getb(payload, "breakout_long_ready"),
-        "orb_long":   getb(payload, "orb_long_ready"),
-        "avwap_long": getb(payload, "avwap_long_ready"),
-        "pull_short": getb(payload, "pullback_short_ready"),
-        "brk_short":  getb(payload, "breakout_short_ready"),
-        "orb_short":  getb(payload, "orb_short_ready"),
-    }
-
-def combine_scores(payload: Dict[str, Any]) -> Dict[str, float]:
-    senti = sentiment_score(payload)           # 0..1
-    wave_b, wave_c = waves_bias_conf(payload)  # "bullish"/"bearish"/"neutral", 0..1
-    tech = tech_readiness(payload)
-
-    # technical subscores
-    tl = sum(1 for k in ("pull_long","brk_long","orb_long","avwap_long") if tech[k]) / 4.0
-    ts = sum(1 for k in ("pull_short","brk_short","orb_short")           if tech[k]) / 3.0
-
-    # wave directional confidence
-    wave_long  = wave_c if wave_b == "bullish" else (0.0 if wave_b == "bearish" else wave_c*0.25)
-    wave_short = wave_c if wave_b == "bearish" else (0.0 if wave_b == "bullish" else wave_c*0.25)
-
-    # sentiment → centered scores
-    senti_long  = max(0.0, (senti - 0.5) * 2.0)   # 0..1
-    senti_short = max(0.0, (0.5 - senti) * 2.0)
-
-    long_score  = SENTI_WEIGHT*senti_long  + WAVE_WEIGHT*wave_long  + TECH_WEIGHT*tl
-    short_score = SENTI_WEIGHT*senti_short + WAVE_WEIGHT*wave_short + TECH_WEIGHT*ts
-
-    return {"long": max(0.0, min(1.0, long_score)),
-            "short": max(0.0, min(1.0, short_score))}
-
-def entry_bias_ok(payload: Dict[str, Any], side: str) -> bool:
-    # respect EA H1 bias (when it’s active on EA side)
-    b = str(payload.get("bias_dir", "neutral")).lower()
-    if side == "long"  and b not in ("long","neutral"):  return False
-    if side == "short" and b not in ("short","neutral"): return False
-    return True
-
-def want_open(side: str, payload: Dict[str, Any], scores: Dict[str, float]) -> bool:
-    regime = str(payload.get("regime", "indecision")).lower()
-    score  = scores[side]
-
-    # shorts stricter for XAU unless ADX strong
-    if side == "short":
-        adx = getf(payload, "adx", 0.0)
-        if adx < MIN_ADX_SHORT:
-            return False
-
-    if regime in ("trend","breakout"):
-        return score >= OPEN_TREND_OR_BREAKOUT and entry_bias_ok(payload, side)
-    if regime == "range":
-        return score >= OPEN_RANGE and entry_bias_ok(payload, side)
-    return score >= OPEN_INDECISION and entry_bias_ok(payload, side)
-
-def proposed_orders(side: str, payload: Dict[str, Any]) -> OrdersOut:
-    if side == "long":
-        sl = getf(payload, "long_proposed_sl", 0.0)
-        tp = getf(payload, "long_proposed_tp", 0.0)
-    else:
-        sl = getf(payload, "short_proposed_sl", 0.0)
-        tp = getf(payload, "short_proposed_tp", 0.0)
-    return OrdersOut(sl=sl if sl>0 else None, tp=tp if tp>0 else None)
-
 def hard_guards(payload: Dict[str, Any]) -> Optional[DecisionOut]:
-    # symbol allowlist
+    # allowlist
     sym = (payload.get("symbol") or "").upper()
     if SYMBOL_ALLOW and all(s.upper() != sym for s in SYMBOL_ALLOW):
         return DecisionOut(action="hold", reason=f"Symbol not allowed: {sym}", orders=OrdersOut())
 
-    # spread and DD lock from EA
+    # EA-side risk rails we always honor
     if not getb(payload, "max_spread_pips_ok", True):
         return DecisionOut(action="hold", reason="Spread filter (EA)", orders=OrdersOut())
 
@@ -178,71 +128,184 @@ def hard_guards(payload: Dict[str, Any]) -> Optional[DecisionOut]:
 
     return None
 
-def manage_open_position(payload: Dict[str, Any]) -> DecisionOut:
-    """Light-touch management. EA already handles BE/partial/trailing."""
+def last_resort_management(payload: Dict[str, Any]) -> Optional[DecisionOut]:
+    """If position open, we still enforce a last-resort hard stop by R."""
     pos = position_from(payload)
-    # hard stop on adverse R multiple
-    if pos["r_now"] <= -HARD_STOP_R_MULT:
+    if pos["has"] and pos["r_now"] <= -HARD_STOP_R_MULT:
         return DecisionOut(action="close", reason=f"Hard stop: r_now={pos['r_now']:.2f}", orders=OrdersOut())
+    return None
 
-    # optional: tighten TP near AB=CD completion once > trail start R
+def safe_parse_json(txt: str) -> Optional[dict]:
+    try:
+        return json.loads(txt)
+    except Exception:
+        try:
+            # remove trailing commas
+            repaired = json.loads(txt.replace(",}", "}").replace(",]", "]"))
+            return repaired
+        except Exception:
+            return None
+
+# ------------- GPT call -------------
+SYSTEM_PROMPT = (
+    "You are a disciplined, risk-aware trading decision engine for XAUUSD.\n"
+    "Return STRICT JSON ONLY (no prose). Keys:\n"
+    "action: one of open_long, open_short, modify, close, hold\n"
+    "reason: concise explanation referencing key evidence used\n"
+    "orders: { sl: number|null, tp: number|null, close_partial_volume: number|null }\n"
+    "Rules:\n"
+    "- Respect the provided risk context: do not suggest trades that violate an obvious EA guard (e.g., massive spread, DD lock). "
+    "Those will be filtered anyway, but your reasoning should be consistent.\n"
+    "- Shorts require stronger trend/ADX evidence than longs.\n"
+    "- Prefer SL based on swing/ATR context in the payload; TP ≥ 1.8R by default unless a nearer strong S/R or AB=CD completion is present.\n"
+    "- If a position is already open, prefer 'modify' or 'hold' unless a close is clearly justified.\n"
+    "- If no edge: action='hold'.\n"
+    "Output nothing but the JSON object."
+)
+
+def build_user_prompt(payload: Dict[str, Any]) -> str:
+    # Condense candles to a tiny summary to keep token load sane
+    candles_txt = "null"
+    if isinstance(payload.get("candles"), list) and payload["candles"]:
+        try:
+            last = payload["candles"][-5:]
+            # keep only t/o/h/l/c
+            slim = [{"t": c.get("t"), "o": c.get("o"), "h": c.get("h"), "l": c.get("l"), "c": c.get("c")} for c in last]
+            candles_txt = json.dumps(slim)
+        except Exception:
+            candles_txt = "null"
+
     waves = payload.get("waves") or {}
-    completion = getf(waves, "completion_price", 0.0)
-    if pos["dir"] == "long" and pos["r_now"] >= TRAIL_START_R and completion > 0:
-        tp_now = pos["tp"]
-        if tp_now and tp_now > completion:
-            return DecisionOut(action="modify", reason="Tighten TP to AB=CD completion", orders=OrdersOut(tp=completion))
-    if pos["dir"] == "short" and pos["r_now"] >= TRAIL_START_R and completion > 0:
-        tp_now = pos["tp"]
-        if tp_now and tp_now < completion:
-            return DecisionOut(action="modify", reason="Tighten TP to AB=CD completion", orders=OrdersOut(tp=completion))
+    senti = combined_sentiment(payload)
 
-    return DecisionOut(action="hold", reason="EA managing (BE/partial/trail)", orders=OrdersOut())
+    compact = {
+        "symbol": payload.get("symbol"),
+        "time": payload.get("server_time"),
+        "session": payload.get("session"),
+        "regime": payload.get("regime"),
+        "bias_dir": payload.get("bias_dir"),
+        "adx": payload.get("adx"),
+        "bb_width": payload.get("bb_width"),
+        "ema_sep_pct": payload.get("ema_sep_pct"),
+        "lrc_angle_deg": payload.get("lrc_angle_deg"),
+        "readiness": {
+            "pullback_long": payload.get("pullback_long_ready"),
+            "breakout_long": payload.get("breakout_long_ready"),
+            "orb_long": payload.get("orb_long_ready"),
+            "avwap_long": payload.get("avwap_long_ready"),
+            "pullback_short": payload.get("pullback_short_ready"),
+            "breakout_short": payload.get("breakout_short_ready"),
+            "orb_short": payload.get("orb_short_ready"),
+        },
+        "prices": {"bid": payload.get("bid"), "ask": payload.get("ask")},
+        "atr": payload.get("atr"),
+        "swings": {"high": payload.get("swing_high"), "low": payload.get("swing_low")},
+        "proposed": {
+            "long": {"sl": payload.get("long_proposed_sl"),  "tp": payload.get("long_proposed_tp")},
+            "short":{"sl": payload.get("short_proposed_sl"), "tp": payload.get("short_proposed_tp")}
+        },
+        "position": payload.get("position"),
+        "results": payload.get("today_pl"),
+        "waves": {
+            "valid": (waves.get("valid_abcd") if isinstance(waves.get("valid_abcd"), bool) else False),
+            "pattern": waves.get("pattern"),
+            "bias": waves.get("bias"),
+            "completion_price": waves.get("completion_price"),
+            "confidence": waves.get("confidence"),
+        },
+        "sentiment": senti,  # blended sentiment (payload + server)
+        "candles_tail": candles_txt,
+        "guards_echo": {
+            "spread_ok": payload.get("max_spread_pips_ok", True),
+            "dd_locked": payload.get("daily_dd_locked", False)
+        }
+    }
+    return json.dumps(compact, separators=(",", ":"))  # dense JSON user message
 
-# ---------------- Endpoint -------------------
+def call_gpt(payload: Dict[str, Any]) -> Optional[dict]:
+    user_content = build_user_prompt(payload)
+    rsp = OAI.chat.completions.create(
+        model=OPENAI_MODEL,
+        temperature=0.15,
+        response_format={"type": "json_object"},
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user",   "content": user_content},
+        ],
+    )
+    txt = (rsp.choices[0].message.content or "").strip()
+    return safe_parse_json(txt)
+
+# ------------- Endpoint -------------
 @app.post("/gpt/manage", response_model=DecisionOut)
 async def gpt_manage(req: Request):
     payload: Dict[str, Any] = await req.json()
 
-    # hard guards
+    # 1) Hard guards (symbol/spread/DD lock)
     hg = hard_guards(payload)
     if hg is not None:
         return hg
 
-    # if position open, keep decisions minimal
-    pos = position_from(payload)
-    if pos["has"]:
-        return manage_open_position(payload)
+    # 2) If a position is open, we still enforce last-resort -R close locally
+    lr = last_resort_management(payload)
+    if lr is not None:
+        return lr
 
-    # flat → evaluate entries
-    scores = combine_scores(payload)
-    long_ok  = want_open("long",  payload, scores)
-    short_ok = want_open("short", payload, scores)
+    # 3) Let GPT decide
+    g = call_gpt(payload)
+    if not isinstance(g, dict):
+        return DecisionOut(action="hold", reason="Model returned no/invalid JSON.", orders=OrdersOut())
 
-    if long_ok or short_ok:
-        if scores["long"] >= scores["short"]:
-            od = proposed_orders("long", payload)
-            return DecisionOut(action="open_long",
-                               reason=f"Open long (score={scores['long']:.2f})",
-                               orders=od)
-        else:
-            od = proposed_orders("short", payload)
-            return DecisionOut(action="open_short",
-                               reason=f"Open short (score={scores['short']:.2f})",
-                               orders=od)
+    # Normalize GPT output into the contract
+    action = str(g.get("action", "hold")).strip().lower()
+    if action not in ("open_long","open_short","modify","close","hold"):
+        action = "hold"
 
-    return DecisionOut(action="hold", reason="No edge (scores below thresholds / bias/regime mismatch)", orders=OrdersOut())
+    orders_in = g.get("orders") or {}
+    orders = OrdersOut(
+        sl = orders_in.get("sl"),
+        tp = orders_in.get("tp"),
+        close_partial_volume = orders_in.get("close_partial_volume"),
+    )
 
-# ---- Simple sentiment setter for testing ----
+    # 4) Final safety checks (shorts w/ weak ADX veto)
+    if action == "open_short":
+        adx = getf(payload, "adx", 0.0)
+        if adx < MIN_ADX_SHORT:
+            return DecisionOut(action="hold", reason=f"Veto weak short (ADX {adx:.1f}<{MIN_ADX_SHORT})", orders=OrdersOut())
+
+    # 5) Return GPT’s decision
+    return DecisionOut(action=action, reason=str(g.get("reason","")).strip(), orders=orders)
+
+# ------------- Sentiment endpoints -------------
 @app.get("/sentiment/set")
-async def set_sentiment(bull: float, bear: float):
+async def sentiment_set(bull: float, bear: float):
     bull = max(0.0, min(1.0, float(bull)))
     bear = max(0.0, min(1.0, float(bear)))
     if bull == 0 and bear == 0:
         bull, bear = 0.5, 0.5
-    GLOBAL_SENTIMENT.update({"bull": bull, "bear": bear, "ts": time.time()})
-    return {"ok": True, "sentiment": GLOBAL_SENTIMENT}
+    SENTIMENT.update({"bull": bull, "bear": bear, "ts": time.time()})
+    return {"ok": True, "sentiment": SENTIMENT}
+
+@app.post("/sentiment/ingest")
+async def sentiment_ingest(component: str, score: float):
+    """
+    POST arbitrary sub-sentiment signals you compute elsewhere (0..1 bull).
+    We'll keep a simple average with existing components and update the headline score.
+    body (JSON): { "component": "news_risk", "score": 0.62 }
+    """
+    score = max(0.0, min(1.0, float(score)))
+    comp = SENTIMENT.setdefault("components", {})
+    comp[component] = {"score": score, "ts": time.time()}
+    # headline = average of components (if any) blended 70% with existing headline
+    if comp:
+        avg = sum(v["score"] for v in comp.values()) / len(comp)
+        new_bull = 0.7 * SENTIMENT["bull"] + 0.3 * avg
+        SENTIMENT["bull"] = max(0.0, min(1.0, new_bull))
+        SENTIMENT["bear"] = 1.0 - SENTIMENT["bull"]
+        SENTIMENT["ts"] = time.time()
+    return {"ok": True, "sentiment": SENTIMENT}
 
 @app.get("/")
 async def root():
-    return {"ok": True, "msg": "GM GPT Trade Server — regime/bias + tech + AB=CD + sentiment, with prop-safe guards."}
+    return {"ok": True, "msg": "GM GPT Trade Server — GPT makes decisions w/ sentiment, waves, and tech context (prop-guarded)."}
