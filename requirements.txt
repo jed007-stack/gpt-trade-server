@@ -1,6 +1,6 @@
-fastapi
-uvicorn
-openai>=1.30.5
-pydantic
-requests
-pytz
+fastapi>=0.111,<0.114
+uvicorn[standard]>=0.23,<0.32
+pydantic>=2.6,<3
+openai>=1.52,<2
+requests>=2.31,<3
+pytz>=2024.1
