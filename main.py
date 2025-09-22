@@ -5,28 +5,32 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-import os, json, time
+import os, json, time, logging
 
-# ------------- OpenAI -------------
+# ---------- OpenAI ----------
 from openai import OpenAI
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
     raise RuntimeError("OPENAI_API_KEY is not set")
 
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")  # e.g., gpt-4o, gpt-4o-mini, gpt-4.1
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")  # e.g. gpt-4o, gpt-4o-mini
 OAI = OpenAI(api_key=OPENAI_API_KEY)
 
-# ------------- Server knobs -------------
-SYMBOL_ALLOW = set(os.getenv("SYMBOL_ALLOW", "XAUUSD,XAUUSD.m,XAUUSD_i").split(","))
+# ---------- Server knobs ----------
+SYMBOL_ALLOW = set(filter(None, (os.getenv("SYMBOL_ALLOW", "XAUUSD,XAUUSD.m,XAUUSD_i").split(","))))
 HARD_STOP_R_MULT = float(os.getenv("HARD_STOP_R_MULT", "1.30"))   # close if r_now <= -1.30
-MIN_ADX_SHORT    = float(os.getenv("MIN_ADX_SHORT", "24.0"))      # veto weak shorts
+MIN_ADX_SHORT    = float(os.getenv("MIN_ADX_SHORT", "24.0"))      # shorts need stronger ADX
+LOG_LEVEL        = os.getenv("LOG_LEVEL", "INFO").upper()
 
-# ------------- Sentiment store -------------
+logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s | %(levelname)s | %(message)s")
+log = logging.getLogger("gpt-trade-server")
+
+# ---------- Sentiment store (simple rolling blend) ----------
 SENTIMENT = {
     "bull": 0.5,
     "bear": 0.5,
-    "components": {},
+    "components": {},   # {name: {score, ts}}
     "ts": time.time(),
 }
 
@@ -51,13 +55,14 @@ def combined_sentiment(payload: Dict[str, Any]) -> Dict[str, Any]:
         }
     }
 
-# ------------- API + schema -------------
-app = FastAPI(title="GM GPT Trade Server", version="2.0")
+# ---------- FastAPI ----------
+app = FastAPI(title="GM GPT Trade Server", version="2.1")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_methods=["*"], allow_headers=["*"], allow_credentials=False
 )
 
+# ---------- Schemas ----------
 class OrdersOut(BaseModel):
     sl: Optional[float] = None
     tp: Optional[float] = None
@@ -68,7 +73,7 @@ class DecisionOut(BaseModel):
     reason: str
     orders: OrdersOut = OrdersOut()
 
-# ------------- Helpers -------------
+# ---------- Helpers ----------
 def getf(d: Dict[str, Any], k: str, default: float = 0.0) -> float:
     try: return float(d.get(k, default))
     except Exception: return default
@@ -77,14 +82,14 @@ def getb(d: Dict[str, Any], k: str, default: bool = False) -> bool:
     v = d.get(k, default)
     if isinstance(v, bool): return v
     if isinstance(v, (int, float)): return v != 0
-    if isinstance(v, str): return v.lower() in ("true","1","yes","y")
+    if isinstance(v, str): return v.strip().lower() in ("true","1","yes","y","t")
     return bool(v)
 
 def position_from(payload: Dict[str, Any]) -> Dict[str, Any]:
     p = payload.get("position") or {}
     return {
         "has": getb(p, "has", False),
-        "dir": p.get("dir"),
+        "dir": (p.get("dir") or "").lower() if isinstance(p.get("dir"), str) else None,
         "volume": getf(p, "volume", 0.0),
         "entry": getf(p, "entry", 0.0),
         "sl": getf(p, "sl", 0.0),
@@ -117,6 +122,7 @@ def last_resort_management(payload: Dict[str, Any]) -> Optional[DecisionOut]:
     return None
 
 def safe_parse_json(txt: str) -> Optional[dict]:
+    # tolerate trailing commas if they ever sneak in
     try:
         return json.loads(txt)
     except Exception:
@@ -125,13 +131,13 @@ def safe_parse_json(txt: str) -> Optional[dict]:
         except Exception:
             return None
 
-# ------------- GPT call -------------
+# ---------- GPT calls ----------
 SYSTEM_PROMPT = (
     "You are a disciplined, risk-aware trading decision engine for XAUUSD.\n"
     "Return STRICT JSON ONLY (no prose). Keys:\n"
-    "action: one of open_long, open_short, modify, close, hold\n"
-    "reason: concise explanation referencing key evidence used\n"
-    "orders: { sl: number|null, tp: number|null, close_partial_volume: number|null }\n"
+    "  action: one of open_long, open_short, modify, close, hold\n"
+    "  reason: concise explanation referencing key evidence used\n"
+    "  orders: { sl: number|null, tp: number|null, close_partial_volume: number|null }\n"
     "Rules:\n"
     "- Respect provided guards; be consistent with them in your rationale.\n"
     "- Shorts require stronger trend/ADX than longs.\n"
@@ -142,12 +148,13 @@ SYSTEM_PROMPT = (
 )
 
 def build_user_prompt(payload: Dict[str, Any]) -> str:
+    # down-sample candles for token economy
     candles_txt = "null"
     if isinstance(payload.get("candles"), list) and payload["candles"]:
         try:
-            last = payload["candles"][-5:]
+            last = payload["candles"][-8:]  # up to 8 most recent for context
             slim = [{"t": c.get("t"), "o": c.get("o"), "h": c.get("h"), "l": c.get("l"), "c": c.get("c")} for c in last]
-            candles_txt = json.dumps(slim)
+            candles_txt = json.dumps(slim, separators=(",", ":"))
         except Exception:
             candles_txt = "null"
 
@@ -156,8 +163,7 @@ def build_user_prompt(payload: Dict[str, Any]) -> str:
 
     compact = {
         "symbol": payload.get("symbol"),
-        "time": payload.get("server_time"),
-        "session": payload.get("session"),
+        "server_time": payload.get("server_time"),
         "regime": payload.get("regime"),
         "bias_dir": payload.get("bias_dir"),
         "adx": payload.get("adx"),
@@ -199,30 +205,43 @@ def build_user_prompt(payload: Dict[str, Any]) -> str:
     return json.dumps(compact, separators=(",", ":"))
 
 def call_gpt(payload: Dict[str, Any]) -> Optional[dict]:
-    user_content = build_user_prompt(payload)
-    rsp = OAI.chat.completions.create(
-        model=OPENAI_MODEL,
-        temperature=0.15,
-        response_format={"type": "json_object"},
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user",   "content": user_content},
-        ],
-    )
-    txt = (rsp.choices[0].message.content or "").strip()
-    return safe_parse_json(txt)
+    try:
+        user_content = build_user_prompt(payload)
+        rsp = OAI.chat.completions.create(
+            model=OPENAI_MODEL,
+            temperature=0.15,
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user",   "content": user_content},
+            ],
+        )
+        txt = (rsp.choices[0].message.content or "").strip()
+        log.debug(f"GPT raw: {txt[:1000]}")
+        return safe_parse_json(txt)
+    except Exception as e:
+        log.error(f"OpenAI error: {e}")
+        return None
 
-# ------------- Endpoint -------------
+# ---------- Endpoint ----------
 @app.post("/gpt/manage", response_model=DecisionOut)
 async def gpt_manage(req: Request):
-    payload: Dict[str, Any] = await req.json()
+    try:
+        payload: Dict[str, Any] = await req.json()
+    except Exception:
+        # EA always sends JSON, but be defensive
+        raw = await req.body()
+        log.warning(f"Non-JSON body received: {raw[:200]!r}")
+        return DecisionOut(action="hold", reason="Bad request body", orders=OrdersOut())
 
-    # 1) Hard guards
+    log.debug(f"payload: {json.dumps(payload)[:1200]}")
+
+    # 1) Hard guards (spread/DD lock/symbol)
     hg = hard_guards(payload)
     if hg is not None:
         return hg
 
-    # 2) Last-resort management if already in a trade
+    # 2) Emergency risk guard if already in a trade
     lr = last_resort_management(payload)
     if lr is not None:
         return lr
@@ -252,9 +271,10 @@ async def gpt_manage(req: Request):
         if adx < MIN_ADX_SHORT:
             return DecisionOut(action="hold", reason=f"Veto weak short (ADX {adx:.1f}<{MIN_ADX_SHORT})", orders=OrdersOut())
 
+    # 5) Done
     return DecisionOut(action=action, reason=str(g.get("reason","")).strip(), orders=orders)
 
-# ------------- Sentiment endpoints -------------
+# ---------- Sentiment endpoints ----------
 @app.get("/sentiment/set")
 async def sentiment_set(bull: float, bear: float):
     bull = max(0.0, min(1.0, float(bull)))
