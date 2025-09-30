@@ -22,11 +22,15 @@ HARD_STOP_R       = float(os.getenv("HARD_STOP_R_MULT", "1.30"))   # emergency c
 MIN_ADX_SHORT     = float(os.getenv("MIN_ADX_SHORT", "24.0"))      # shorts need stronger ADX
 LOG_LEVEL         = os.getenv("LOG_LEVEL", "INFO").upper()
 
+# Debug toggles (surface payload + raw GPT JSON in telemetry)
+ECHO_PAYLOAD      = os.getenv("ECHO_PAYLOAD", "1").lower() in ("1","true","yes","y","on")
+ECHO_GPT_RAW      = os.getenv("ECHO_GPT_RAW", "1").lower() in ("1","true","yes","y","on")
+
 logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s | %(levelname)s | %(message)s")
 log = logging.getLogger("gpt-trade-server")
 
 # ---------- FastAPI ----------
-app = FastAPI(title="GM GPT Trade Server (Actions Only)", version="5.0")
+app = FastAPI(title="GM GPT Trade Server (Actions Only)", version="5.1")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_methods=["*"], allow_headers=["*"], allow_credentials=False
@@ -56,7 +60,7 @@ def getb(d: Dict[str, Any], k: str, default: bool = False) -> bool:
     v = d.get(k, default)
     if isinstance(v, bool): return v
     if isinstance(v, (int, float)): return v != 0
-    if isinstance(v, str): return v.strip().lower() in ("true","1","yes","y","t")
+    if isinstance(v, str): return v.strip().lower() in ("true","1","yes","y","t","on")
     return bool(v)
 
 def position_from(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -294,7 +298,7 @@ def last_resort_management(payload: Dict[str, Any]) -> Optional[DecisionOut]:
         return DecisionOut(action="close", reason=f"Hard stop: r_now={pos['r_now']:.2f}", align=True, confidence=1.0)
     return None
 
-# ---------- GPT call ----------
+# ---------- Prompt building ----------
 SYSTEM_PROMPT = (
     "You are a disciplined, risk-aware trading decision engine for XAUUSD.\n"
     "Return STRICT JSON ONLY. Keys:\n"
@@ -307,7 +311,7 @@ SYSTEM_PROMPT = (
     "- Do NOT suggest SL/TP; EA manages them.\n"
 )
 
-def build_user_prompt(payload: Dict[str, Any]) -> str:
+def build_user_payload_dict(payload: Dict[str, Any]) -> Dict[str, Any]:
     # Keep payload compact (include only relevant bits)
     candles_txt = "null"
     if isinstance(payload.get("candles"), list) and payload["candles"]:
@@ -318,7 +322,7 @@ def build_user_prompt(payload: Dict[str, Any]) -> str:
         except Exception:
             candles_txt = "null"
 
-    compact = {
+    return {
         "symbol": payload.get("symbol"),
         "server_time": payload.get("server_time"),
         "trigger": payload.get("trigger"),
@@ -338,9 +342,12 @@ def build_user_prompt(payload: Dict[str, Any]) -> str:
         "align_flags": payload.get("align_flags") or {},
         "candles_tail": candles_txt,
     }
-    return json.dumps(compact, separators=(",", ":"))
 
-def call_gpt(payload: Dict[str, Any]) -> Optional[dict]:
+def build_user_prompt(payload: Dict[str, Any]) -> str:
+    return json.dumps(build_user_payload_dict(payload), separators=(",", ":"))
+
+# ---------- GPT call ----------
+def call_gpt(payload: Dict[str, Any]) -> tuple[Optional[dict], Optional[str]]:
     try:
         user_content = build_user_prompt(payload)
         rsp = OAI.chat.completions.create(
@@ -354,10 +361,10 @@ def call_gpt(payload: Dict[str, Any]) -> Optional[dict]:
         )
         txt = (rsp.choices[0].message.content or "").strip()
         log.debug(f"GPT raw: {txt[:1200]}")
-        return safe_parse_json(txt)
+        return safe_parse_json(txt), txt
     except Exception as e:
         log.error(f"OpenAI error: {e}")
-        return None
+        return None, None
 
 # ---------- Endpoints ----------
 @app.post("/gpt/manage", response_model=DecisionOut)
@@ -383,14 +390,20 @@ async def gpt_manage(req: Request):
         return lr
 
     # 3) GPT proposes
-    g = call_gpt(payload)
+    g, gpt_raw = call_gpt(payload)
+    user_payload_dict = build_user_payload_dict(payload)  # for echo
+
     if not isinstance(g, dict):
         return DecisionOut(
             action="hold", reason="Model returned no/invalid JSON.",
             align=False, confidence=0.0,
             veto_reasons=["model_invalid"],
             requirements=build_requirements(payload, "open_long", 0.0),
-            telemetry={"payload_keys": list(payload.keys())[:20]}
+            telemetry={
+                "payload_keys": list(payload.keys())[:20],
+                **({"payload_echo": user_payload_dict} if ECHO_PAYLOAD else {}),
+                **({"gpt_raw": gpt_raw} if (ECHO_GPT_RAW and gpt_raw) else {})
+            }
         )
 
     proposed = str(g.get("action", "hold")).strip().lower()
@@ -416,7 +429,9 @@ async def gpt_manage(req: Request):
                 "regime": payload.get("regime"),
                 "allow_longs": getb(payload,"allow_longs",True),
                 "allow_shorts": getb(payload,"allow_shorts",False),
-                "align_flags": payload.get("align_flags")
+                "align_flags": payload.get("align_flags"),
+                **({"payload_echo": user_payload_dict} if ECHO_PAYLOAD else {}),
+                **({"gpt_raw": gpt_raw} if (ECHO_GPT_RAW and gpt_raw) else {})
             }
         )
 
@@ -428,7 +443,13 @@ async def gpt_manage(req: Request):
             align=align_ok, confidence=conf,
             veto_reasons=["confidence_below_min"],
             requirements=build_requirements(payload, proposed, conf),
-            telemetry={"proposed": proposed, "min_conf": cons["min_confidence"], "conf_now": conf}
+            telemetry={
+                "proposed": proposed,
+                "min_conf": cons["min_confidence"],
+                "conf_now": conf,
+                **({"payload_echo": user_payload_dict} if ECHO_PAYLOAD else {}),
+                **({"gpt_raw": gpt_raw} if (ECHO_GPT_RAW and gpt_raw) else {})
+            }
         )
 
     # Shorts: additional ADX requirement
@@ -441,7 +462,11 @@ async def gpt_manage(req: Request):
                 align=False, confidence=conf,
                 veto_reasons=[f"adx_short<{MIN_ADX_SHORT}"],
                 requirements=build_requirements(payload, proposed, conf),
-                telemetry={"adx": adx}
+                telemetry={
+                    "adx": adx,
+                    **({"payload_echo": user_payload_dict} if ECHO_PAYLOAD else {}),
+                    **({"gpt_raw": gpt_raw} if (ECHO_GPT_RAW and gpt_raw) else {})
+                }
             )
 
     # 5) Pass-through approval (EA executes)
@@ -451,7 +476,11 @@ async def gpt_manage(req: Request):
         align=align_ok, confidence=conf,
         veto_reasons=[],
         requirements=None,
-        telemetry={"approved": True}
+        telemetry={
+            "approved": True,
+            **({"payload_echo": user_payload_dict} if ECHO_PAYLOAD else {}),
+            **({"gpt_raw": gpt_raw} if (ECHO_GPT_RAW and gpt_raw) else {})
+        }
     )
 
 # Quick diagnostics to see what the server thinks of your payload
