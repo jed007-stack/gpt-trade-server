@@ -13,11 +13,11 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
     raise RuntimeError("OPENAI_API_KEY is not set")
 
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")  # gpt-4o / gpt-4o-mini
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")  # gpt-4o / gpt-4o-mini
 OAI = OpenAI(api_key=OPENAI_API_KEY)
 
 # ---------- Server knobs (ENV overrides) ----------
-SYMBOL_ALLOW      = set(filter(None, (os.getenv("SYMBOL_ALLOW", "XAUUSD,XAUUSD.M,XAUUSD_I").split(","))))
+SYMBOL_ALLOW      = set(filter(None, (os.getenv("SYMBOL_ALLOW", "XAUUSD,XAUUSDECN,XAUUSD.M,XAUUSD_I").split(","))))
 HARD_STOP_R       = float(os.getenv("HARD_STOP_R_MULT", "1.30"))   # emergency close if r_now <= -1.30
 MIN_ADX_SHORT     = float(os.getenv("MIN_ADX_SHORT", "24.0"))      # shorts need stronger ADX
 LOG_LEVEL         = os.getenv("LOG_LEVEL", "INFO").upper()
