@@ -1,6 +1,7 @@
-fastapi>=0.111,<0.114
-uvicorn[standard]>=0.23,<0.32
-pydantic>=2.6,<3
-openai>=1.52,<2
-requests>=2.31,<3
-pytz>=2024.1
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+openai==1.44.0
+pydantic==2.9.2
+requests==2.32.3
+pytz==2024.2
+python-multipart==0.0.9
