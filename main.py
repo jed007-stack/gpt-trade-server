@@ -42,10 +42,9 @@ class DecisionOut(BaseModel):
     reason: str
     align: Optional[bool] = None
     confidence: Optional[float] = None
-    # Rich introspection so you see EXACTLY why it held and what’s needed to approve:
-    veto_reasons: Optional[list[str]] = None   # concrete blockers hit
-    requirements: Optional[dict] = None        # what would satisfy an OPEN right now
-    telemetry: Optional[dict] = None           # snapshot of key inputs (debugging)
+    veto_reasons: Optional[list[str]] = None
+    requirements: Optional[dict] = None
+    telemetry: Optional[dict] = None
 
 # ---------- Small helpers ----------
 def getf(d: Dict[str, Any], k: str, default: float = 0.0) -> float:
@@ -78,7 +77,6 @@ def position_from(payload: Dict[str, Any]) -> Dict[str, Any]:
 def guards_from(payload: Dict[str, Any]) -> Dict[str, Any]:
     g = payload.get("guards") or {}
     if not g:
-        # Back-compat: accept flat keys if EA sent older payload
         g = {
             "spread_ok": getb(payload, "max_spread_pips_ok", True),
             "dd_locked": getb(payload, "daily_dd_locked", False),
@@ -96,19 +94,20 @@ def constraints_from(payload: Dict[str, Any]) -> Dict[str, Any]:
     c = payload.get("constraints") or {}
     return {
         "require_align": getb(c, "require_align", True),
-        "min_confidence": float(c.get("min_confidence", 0.60)),  # slightly friendlier default
+        "min_confidence": float(c.get("min_confidence", 0.60)),
     }
 
 def readiness_from(payload: Dict[str, Any]) -> Dict[str, Any]:
     r = payload.get("readiness") or {}
-    # Also accept common synonyms from flat payloads
     flat = payload
+
     def any_true(d, *keys):
         for k in keys:
             v = d.get(k)
             if isinstance(v, bool) and v: return True
             if isinstance(v, (int,float)) and v != 0: return True
         return False
+
     return {
         "pullback_long":  any_true(r,"pullback_long","pullback_long_ready")  or any_true(flat,"pullback_long_ready","pullbackReadyLong","long_pullback_ready"),
         "breakout_long":  any_true(r,"breakout_long","breakout_long_ready")  or any_true(flat,"breakout_long_ready","breakoutReadyLong","long_breakout_ready"),
@@ -140,7 +139,7 @@ def align_flags_from(payload: Dict[str, Any]) -> Tuple[bool, bool]:
     af = payload.get("align_flags") or {}
     return bool(af.get("long_ok", False)), bool(af.get("short_ok", False))
 
-# ---------- Requirements builder (what would have approved the trade) ----------
+# ---------- Requirements builder ----------
 def side_from_action(a: str) -> Optional[str]:
     if a == "open_long": return "long"
     if a == "open_short": return "short"
@@ -162,7 +161,7 @@ def build_requirements(payload: Dict[str, Any], proposed: str, conf_now: float) 
     need = []
     targets = {}
 
-    # environment
+   # environment
     if not g["spread_ok"]:     need.append("spread_ok");           targets["spread_ok"] = True
     if g["dd_locked"]:         need.append("dd_unlocked");         targets["dd_locked"] = False
     if not g["active_window"]: need.append("active_window");       targets["active_window"] = True
@@ -174,7 +173,7 @@ def build_requirements(payload: Dict[str, Any], proposed: str, conf_now: float) 
     if side == "short" and not allow_shorts:
         need.append("allow_shorts"); targets["allow_shorts"] = True
 
-    # alignment (either align_flag or readiness)
+    # alignment
     if side == "long":
         if not (long_ok_flag or any([getb(r,"pullback_long"), getb(r,"breakout_long"), getb(r,"orb_long"), getb(r,"avwap_long")])):
             need.append("long_setup_ready")
@@ -202,7 +201,6 @@ def build_requirements(payload: Dict[str, Any], proposed: str, conf_now: float) 
 
 # ---------- Alignment + confidence ----------
 def compute_alignment_and_confidence(payload: Dict[str, Any], proposed: str) -> Tuple[bool, float, str, list[str]]:
-    """Return (align_ok, confidence_0_1, note, veto_reasons[])"""
     veto = []
     r = readiness_from(payload)
     g = guards_from(payload)
@@ -217,21 +215,22 @@ def compute_alignment_and_confidence(payload: Dict[str, Any], proposed: str) -> 
     long_ok_flag, short_ok_flag = align_flags_from(payload)
     trig_side = trigger_side(payload)
 
-    # base confidence
-    adx_score = min(1.0, max(0.0, (adx - 10.0) / 20.0))     # ~0 at 10, ~1 at 30
-    bbw_score = min(1.0, max(0.0, (bbw - 0.02) / 0.06))     # expansion helps
-    ema_score = min(1.0, max(0.0, abs(ema_sep) / 0.25))     # separation helps
+    adx_score = min(1.0, max(0.0, (adx - 10.0) / 20.0))
+    bbw_score = min(1.0, max(0.0, (bbw - 0.02) / 0.06))
+    ema_score = min(1.0, max(0.0, abs(ema_sep) / 0.25))
     base_conf = 0.25*adx_score + 0.25*bbw_score + 0.25*ema_score + 0.25*(1.0 if regime in ("trend","breakout") else 0.0)
 
-    # environment
-    if not g["spread_ok"]:     veto.append("spread_ok=false")
-    if g["dd_locked"]:         veto.append("dd_locked=true")
-    if not g["active_window"]: veto.append("active_window=false")
-    if g["news_block"]:        veto.append("news_block=true")
+    if not g["spread_ok"]:
+        veto.append("spread_ok=false")
+    if g["dd_locked"]:
+        veto.append("dd_locked=true")
+    if not g["active_window"]:
+        veto.append("active_window=false")
+    if g["news_block"]:
+        veto.append("news_block=true")
     if veto:
         return (False, 0.0, "Environment block", veto)
 
-    # permissions
     if proposed == "open_long" and not allow_longs:
         veto.append("allow_longs=false")
     if proposed == "open_short" and not allow_shorts:
@@ -239,7 +238,6 @@ def compute_alignment_and_confidence(payload: Dict[str, Any], proposed: str) -> 
     if veto:
         return (False, base_conf*0.5, "Side permission blocked", veto)
 
-    # keep GPT on the EA event side
     if trig_side == "long" and proposed == "open_short":
         veto.append("opposite_to_event_long")
         return (False, base_conf*0.6, "Opposite to event", veto)
@@ -247,7 +245,6 @@ def compute_alignment_and_confidence(payload: Dict[str, Any], proposed: str) -> 
         veto.append("opposite_to_event_short")
         return (False, base_conf*0.6, "Opposite to event", veto)
 
-    # alignment by flags/votes
     long_vote  = long_ok_flag  or any([getb(r,"pullback_long"), getb(r,"breakout_long"), getb(r,"orb_long"), getb(r,"avwap_long")])
     short_vote = short_ok_flag or any([getb(r,"pullback_short"), getb(r,"breakout_short"), getb(r,"orb_short"), getb(r,"avwap_short")])
     if proposed == "open_long" and not long_vote:
@@ -257,14 +254,12 @@ def compute_alignment_and_confidence(payload: Dict[str, Any], proposed: str) -> 
         veto.append("no_short_setup_ready")
         return (False, base_conf*0.6, "No short setup", veto)
 
-    # shorts need extra juice
     if proposed == "open_short":
         base_conf *= 0.9
         if adx < MIN_ADX_SHORT:
             veto.append(f"adx_short<{MIN_ADX_SHORT}")
             return (False, base_conf*0.7, "Weak ADX for short", veto)
 
-    # close/hold are always aligned
     if proposed in ("close","hold"):
         return (True, 0.8 if proposed=="close" else 0.6, "Non-open action", veto)
 
@@ -312,7 +307,6 @@ SYSTEM_PROMPT = (
 )
 
 def build_user_payload_dict(payload: Dict[str, Any]) -> Dict[str, Any]:
-    # Keep payload compact (include only relevant bits)
     candles_txt = "null"
     if isinstance(payload.get("candles"), list) and payload["candles"]:
         try:
@@ -379,19 +373,19 @@ async def gpt_manage(req: Request):
 
     log.debug(f"payload: {json.dumps(payload)[:1500]}")
 
-    # 1) Hard guards (spread/DD/news/symbol)
+    # 1) Hard guards
     hg = hard_guards(payload)
     if hg is not None:
         return hg
 
-    # 2) Emergency risk guard if already in a trade (does not touch SL/TP)
+    # 2) Emergency guard on r_now
     lr = last_resort_management(payload)
     if lr is not None:
         return lr
 
     # 3) GPT proposes
     g, gpt_raw = call_gpt(payload)
-    user_payload_dict = build_user_payload_dict(payload)  # for echo
+    user_payload_dict = build_user_payload_dict(payload)
 
     if not isinstance(g, dict):
         return DecisionOut(
@@ -410,11 +404,10 @@ async def gpt_manage(req: Request):
     if proposed not in ("open_long","open_short","close","hold"):
         proposed = "hold"
 
-    # 4) Alignment + confidence
+   # 4) Alignment + confidence
     align_ok, conf, note, veto = compute_alignment_and_confidence(payload, proposed)
     cons = constraints_from(payload)
 
-    # Alignment required but failed -> HOLD with requirements
     if cons["require_align"] and not align_ok:
         return DecisionOut(
             action="hold", reason=f"Alignment veto: {note}",
@@ -435,7 +428,6 @@ async def gpt_manage(req: Request):
             }
         )
 
-    # Confidence gate
     if proposed in ("open_long","open_short") and conf < cons["min_confidence"]:
         return DecisionOut(
             action="hold",
@@ -452,7 +444,6 @@ async def gpt_manage(req: Request):
             }
         )
 
-    # Shorts: additional ADX requirement
     if proposed == "open_short":
         adx = getf(payload, "adx", 0.0)
         if adx < MIN_ADX_SHORT:
@@ -469,7 +460,6 @@ async def gpt_manage(req: Request):
                 }
             )
 
-    # 5) Pass-through approval (EA executes)
     reason = str(g.get("reason", "")).strip() or note
     return DecisionOut(
         action=proposed, reason=reason,
@@ -483,7 +473,7 @@ async def gpt_manage(req: Request):
         }
     )
 
-# Quick diagnostics to see what the server thinks of your payload
+# Quick diagnostics
 @app.post("/diag")
 async def diag(req: Request):
     payload = await req.json()
@@ -506,3 +496,41 @@ async def diag(req: Request):
 @app.get("/")
 async def root():
     return {"ok": True, "msg": "GM GPT Trade Server — Actions only (EA owns SL/TP)."}
+
+# ------------------------------------------------------------------
+#                  TRADINGVIEW BRIDGE FOR JED
+# ------------------------------------------------------------------
+from collections import deque
+
+# this queue is ONLY for TradingView → MT5 EA
+tv_jed_queue = deque(maxlen=100)
+
+@app.post("/tv/jed")
+async def tv_jed_in(req: Request):
+    """
+    TradingView webhook target
+    """
+    data = await req.json()
+    src  = data.get("source") or "tradingview"
+    sym  = data.get("symbol") or "XAUUSD"
+    side = data.get("side")   or data.get("action") or ""
+    tag  = data.get("tag")    or f"tv-{int(time.time())}"
+
+    payload = {
+        "source": src,
+        "symbol": sym,
+        "side": side,
+        "tag": tag,
+        "raw": data,
+    }
+    tv_jed_queue.appendleft(payload)
+    return {"ok": True, "queued": True}
+
+@app.get("/tv/jed/next")
+async def tv_jed_next():
+    """
+    MT5 EA polls here. If no signal, return a lightweight object.
+    """
+    if not tv_jed_queue:
+        return {"ok": False, "msg": "no-signal"}
+    return tv_jed_queue.pop()
